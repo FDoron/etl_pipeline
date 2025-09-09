@@ -2,41 +2,46 @@ import os
 from src.utils.logger import logger
 from src.utils.config_loader import Config
 from src.ingestion.ingest import ingest_file
-from src.db.db_ops import init_db
+from src.db.db_ops import init_db, ProcessingJob
 from sqlalchemy.orm import Session
-from sqlalchemy import create_engine, Column, Integer, String
-from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime
 
-Base = declarative_base()
-
-class ProcessingJob(Base):
-    __tablename__ = 'processing_jobs'
-    id = Column(Integer, primary_key=True)
-    file_name = Column(String)
-    status = Column(String)
-    rows_processed = Column(Integer)
-    rows_inserted = Column(Integer)
-    rows_failed = Column(Integer)
-    error_summary = Column(String)
+def redact_sensitive(data):
+    """Redact sensitive fields from log data."""
+    if isinstance(data, dict):
+        return {k: "REDACTED" if k in ['password', 'user', 'connection_string'] else redact_sensitive(v) for k, v in data.items()}
+    return data
 
 def main():
     # Load configuration
     try:
-        Config.load('config/settings.yaml')  # Explicitly specify settings.yaml
-        connection_string = Config.get('db.connection_string')
-        if connection_string is None:
-            raise ValueError("Missing 'db.connection_string' in config/settings.yaml")
+        Config.load('config/settings.yaml')
+        db_type = Config.get('db.type')
+        db_host = Config.get('db.host')
+        db_port = Config.get('db.port')
+        db_user = Config.get('db.user')
+        db_password = Config.get('db.password')
+        db_database = Config.get('db.database')
         providers = Config.get('providers', {})
         inbox_dir = Config.get('paths.inbox', 'data/inbox')
+
+        required_fields = {'db.type': db_type, 'db.host': db_host, 'db.user': db_user, 'db.password': db_password, 'db.database': db_database}
+        missing_fields = [key for key, value in required_fields.items() if value is None]
+        if missing_fields:
+            raise ValueError(f"Missing required config fields: {', '.join(missing_fields)}")
+        
+        if db_type.lower() != 'mysql':
+            raise ValueError(f"Unsupported database type: {db_type}. Expected 'mysql'.")
+        connection_string = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_database}"
     except (FileNotFoundError, RuntimeError, ValueError) as e:
-        logger.error("Configuration loading failed", extra={"error": str(e)})
+        logger.error("Configuration loading failed", extra=redact_sensitive({"error": str(e)}))
         return
     
     # Initialize database
     try:
         SessionLocal = init_db(connection_string)
     except Exception as e:
-        logger.error("Database initialization failed", extra={"connection_string": connection_string, "error": str(e)})
+        logger.error("Database initialization failed", extra=redact_sensitive({"error": str(e)}))
         return
     
     # Process files in inbox
@@ -47,20 +52,23 @@ def main():
         
         # Create a new processing job
         with SessionLocal() as session:
+            provider_key = filename.split('_')[0]
+            report_period = filename.split('_')[-1].split('.')[0]  # e.g., 2023-09
             job = ProcessingJob(
                 file_name=filename,
-                status='PROCESSING',
+                provider=provider_key,
+                report_period=report_period,
+                status='STARTED',
                 rows_processed=0,
                 rows_inserted=0,
                 rows_failed=0,
-                error_summary=''
+                started_at=datetime.utcnow()
             )
             session.add(job)
             session.commit()
-            job_id = job.id
+            job_id = job.job_id
             
             # Ingest file
-            provider_key = filename.split('_')[0]  # e.g., provider1_data.csv -> provider1
             provider_mapping = providers.get(provider_key, {})
             success = ingest_file(file_path, provider_mapping, session, job_id)
             
@@ -68,7 +76,11 @@ def main():
                 logger.info("File processed successfully", extra={"file": filename, "job_id": job_id})
             else:
                 logger.error("File processing failed", extra={"file": filename, "job_id": job_id})
-                session.query(ProcessingJob).filter_by(id=job_id).update({'status': 'FAILED'})
+                session.query(ProcessingJob).filter_by(job_id=job_id).update({
+                    'status': 'FAILED',
+                    'finished_at': datetime.utcnow()
+                })
+                session.commit()
 
 if __name__ == "__main__":
     main()

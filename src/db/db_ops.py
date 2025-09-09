@@ -1,32 +1,55 @@
-from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, Column, Integer, String, Text, Enum, ForeignKey, TIMESTAMP
+from sqlalchemy.orm import declarative_base, sessionmaker
 import pandas as pd
 import json
+from src.utils.logger import logger
+from datetime import datetime
 
 Base = declarative_base()
 
 class ProcessingJob(Base):
     __tablename__ = 'processing_jobs'
-    id = Column(Integer, primary_key=True)
-    file_name = Column(String)
-    status = Column(String)
-    rows_processed = Column(Integer)
-    rows_inserted = Column(Integer)
-    rows_failed = Column(Integer)
+    job_id = Column(Integer, primary_key=True, autoincrement=True)
+    file_name = Column(String(255), nullable=False)
+    provider = Column(String(255))
+    report_period = Column(String(7))
+    rows_processed = Column(Integer, default=0)
+    rows_inserted = Column(Integer, default=0)
+    rows_failed = Column(Integer, default=0)
+    status = Column(Enum('STARTED', 'SUCCESS', 'FAILED', 'PARTIAL', name='job_status'), nullable=False, default='STARTED')
     error_summary = Column(Text)
+    started_at = Column(TIMESTAMP, default=datetime.utcnow)
+    finished_at = Column(TIMESTAMP)
 
 class FailedRow(Base):
     __tablename__ = 'failed_rows'
-    id = Column(Integer, primary_key=True)
-    job_id = Column(Integer, ForeignKey('processing_jobs.id'))
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(Integer, ForeignKey('processing_jobs.job_id'))
     row_number = Column(Integer)
     error_details = Column(Text)
 
+class Reports(Base):
+    __tablename__ = 'reports'
+    id = Column(String(50), primary_key=True)
+    name = Column(String(255))
+    fee = Column(Integer)
+    provider = Column(String(50), primary_key=True)
+    reportPeriod = Column(String(7), primary_key=True)
+    ingested_at = Column(TIMESTAMP, default=datetime.utcnow)
+    status = Column(String(20))
+    job_id = Column(Integer, ForeignKey('processing_jobs.job_id'))
+
 def init_db(connection_string):
-    engine = create_engine(connection_string)
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)
+    try:
+        engine = create_engine(connection_string)
+        # Create tables in correct order
+        ProcessingJob.__table__.create(engine, checkfirst=True)
+        FailedRow.__table__.create(engine, checkfirst=True)
+        Reports.__table__.create(engine, checkfirst=True)
+        return sessionmaker(bind=engine)
+    except Exception as e:
+        logger.error("Database table creation failed", extra={"error": str(e)})
+        raise
 
 def log_failed_row(session, job_id, row_number, errors):
     failed_row = FailedRow(
@@ -35,22 +58,24 @@ def log_failed_row(session, job_id, row_number, errors):
         error_details=json.dumps(errors)
     )
     session.add(failed_row)
+    session.commit()
 
 def insert_dataframe(session, df, table_name, job_id):
-    """Insert dataframe to DB with transaction management."""
     try:
         with session.begin():
             df.to_sql(table_name, session.bind, if_exists='append', index=False)
-            session.query(ProcessingJob).filter_by(id=job_id).update({
+            session.query(ProcessingJob).filter_by(job_id=job_id).update({
                 'status': 'SUCCESS',
                 'rows_inserted': len(df),
-                'rows_failed': 0
+                'rows_failed': 0,
+                'finished_at': datetime.utcnow()
             })
         return True, None
     except Exception as e:
         session.rollback()
-        session.query(ProcessingJob).filter_by(id=job_id).update({
+        session.query(ProcessingJob).filter_by(job_id=job_id).update({
             'status': 'FAILED',
-            'error_summary': str(e)
+            'error_summary': str(e),
+            'finished_at': datetime.utcnow()
         })
         return False, str(e)

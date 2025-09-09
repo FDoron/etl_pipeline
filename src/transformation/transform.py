@@ -2,7 +2,6 @@ import pandas as pd
 from datetime import datetime
 from src.db.db_ops import log_failed_row
 
-
 def normalize_and_validate(df, provider_mapping, session, job_id):
     """Validate and transform dataframe, logging failed rows."""
     mandatory_columns = provider_mapping.get('mandatory_columns', ['id', 'customer_name', 'fee'])
@@ -37,12 +36,18 @@ def normalize_and_validate(df, provider_mapping, session, job_id):
         
         if not pd.isna(row.get('id')):
             try:
-                row['id'] = str(row['id']).zfill(9)  # Pad to 9 digits
+                row['id'] = str(row['id']).zfill(9)
             except (ValueError, TypeError):
                 row_errors.append("ID cannot be converted to string")
         
+        # Add provider and reportPeriod
+        provider = provider_mapping.get('provider', 'unknown')
+        report_period = datetime.now().strftime('%Y-%m')
+        row['provider'] = provider
+        row['reportPeriod'] = report_period
+        
         if row_errors:
-            errors.append({'row': idx + 2, 'errors': row_errors})  # +2 for header and 0-based index
+            errors.append({'row': idx + 2, 'errors': row_errors})
             log_failed_row(session, job_id, idx + 2, row_errors)
         else:
             valid_rows.append(row)
@@ -55,9 +60,11 @@ def normalize_and_validate(df, provider_mapping, session, job_id):
     
     # Apply column mapping and drop unmapped columns
     valid_df = valid_df.rename(columns=column_mapping)
-    valid_df = valid_df[[col for col in required_columns if col in valid_df.columns]]
+    valid_df = valid_df[[col for col in required_columns + ['provider', 'reportPeriod', 'status', 'job_id'] if col in valid_df.columns]]
     
-    # Add ingestion timestamp
-    valid_df['ingestion_timestamp'] = datetime.now()
+    # Add ingestion timestamp and job_id
+    valid_df['ingested_at'] = datetime.now()
+    valid_df['job_id'] = job_id
+    valid_df['status'] = 'PROCESSED'
     
     return valid_df, errors
