@@ -1,86 +1,60 @@
 import os
-from src.utils.logger import get_logger
-from src.utils.config_loader import Config
+import pandas as pd
+from src.utils.logger import log_action
+from src.ingestion.file_ops import ensure_filename_suffix, move_file
 from src.transformation.transform import normalize_and_validate
-from src.ingestion.file_ops import ingest_file, ensure_month_suffix, move_file, archive_file
+from src.db.db_ops import insert_dataframe, init_db
+from sqlalchemy.exc import IntegrityError, DatabaseError
+import pandas.errors
 
-logger = get_logger(__name__)
-config = Config.load("config/settings.yaml")
-
-
-def ingest_files(folder_path: str):
-    """
-    Complete ingestion workflow for all files in a folder.
-    Returns list of dicts with file status, rows, errors.
-    """
-    processed_folder = config["paths"]["processed"]
-    failed_folder = config["paths"]["failed"]
-    archive_folder = config["paths"]["archive"]
-
-    results = []
-
-    files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
-
-    for file in files:
+def ingest_file(file_path, provider_mapping, session, job_id):
+    """Ingest a single file with specific exception handling."""
+    try:
+        file_path = ensure_filename_suffix(file_path)
+        log_action("File ingestion started", {"file": file_path, "job_id": job_id})
+        
+        # Read file with specific error handling
         try:
-            # -------------------------------
-            # Ensure suffix _YYYY-MM (rename if needed)
-            # -------------------------------
-            file_with_suffix = ensure_month_suffix(file, folder_path)
-            full_path = os.path.join(folder_path, file_with_suffix)
-
-            # -------------------------------
-            # Archive original
-            # -------------------------------
-            archive_file(full_path, archive_folder)
-
-            # -------------------------------
-            # Ingest raw file
-            # -------------------------------
-            df = ingest_file(full_path)
-            if df is None:
-                move_file(full_path, failed_folder, "failed")
-                results.append({
-                    "file": file_with_suffix,
-                    "status": "FAILED",
-                    "rows": 0,
-                    "errors": ["Failed to read file"]
-                })
-                continue
-
-            # -------------------------------
-            # Transform & validate
-            # -------------------------------
-            df, valid, errors = normalize_and_validate(
-                df,
-                required_columns=config["required_columns"],
-                column_mapping=config["column_mapping"]
-            )
-
-            if valid:
-                move_file(full_path, processed_folder, "processed")
-                results.append({
-                    "file": file_with_suffix,
-                    "status": "SUCCESS",
-                    "rows": len(df),
-                    "errors": []
-                })
+            if file_path.endswith('.csv'):
+                df = pd.read_csv(file_path)
+            elif file_path.endswith(('.xls', '.xlsx')):
+                df = pd.read_excel(file_path)
+            elif file_path.endswith('.txt'):
+                df = pd.read_table(file_path)
             else:
-                move_file(full_path, failed_folder, "failed")
-                results.append({
-                    "file": file_with_suffix,
-                    "status": "FAILED",
-                    "rows": len(df),
-                    "errors": errors
-                })
-
-        except Exception as e:
-            logger.error(f"Unexpected error processing {file}: {e}")
-            results.append({
-                "file": file,
-                "status": "FAILED",
-                "rows": 0,
-                "errors": [str(e)]
-            })
-
-    return results
+                raise ValueError("Unsupported file format")
+        except pandas.errors.ParserError:
+            log_action("File parsing failed", {"file": file_path, "error": "Invalid file format or structure"})
+            move_file(file_path, 'data/failed', 'failed')
+            return False
+        except FileNotFoundError:
+            log_action("File not found", {"file": file_path})
+            return False
+        
+        # Validate and transform
+        valid_df, errors = normalize_and_validate(df, provider_mapping, session, job_id)
+        if valid_df is None:
+            log_action("Validation failed", {"file": file_path, "errors": errors})
+            move_file(file_path, 'data/failed', 'failed')
+            return False
+        
+        # Insert to DB
+        success, error = insert_dataframe(session, valid_df, 'reports', job_id)
+        if not success:
+            log_action("Database insertion failed", {"file": file_path, "error": error})
+            move_file(file_path, 'data/failed', 'failed')
+            return False
+        
+        log_action("File ingestion completed", {"file": file_path, "rows_inserted": len(valid_df)})
+        move_file(file_path, 'data/processed', 'processed')
+        return True
+    
+    except PermissionError as e:
+        log_action("Permission error", {"file": file_path, "error": str(e)})
+        return False
+    except OSError as e:
+        log_action("OS error", {"file": file_path, "error": str(e)})
+        return False
+    except Exception as e:
+        log_action("Unexpected error", {"file": file_path, "error": str(e)})
+        return False

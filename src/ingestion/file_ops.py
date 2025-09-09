@@ -1,66 +1,44 @@
 import os
-import shutil
 from datetime import datetime
-from src.utils.logger import get_logger
+from src.utils.logger import logger
 
-logger = get_logger(__name__)
+def ensure_filename_suffix(file_path):
+    """Ensure file has _YYYY-MM suffix based on current date if missing."""
+    base, ext = os.path.splitext(file_path)
+    if not base.endswith('_' + datetime.now().strftime('%Y-%m')):
+        new_base = f"{base}_{datetime.now().strftime('%Y-%m')}"
+        new_path = f"{new_base}{ext}"
+        try:
+            os.rename(file_path, new_path)
+            logger.info("Renamed file with date suffix", extra={"original": file_path, "new": new_path})
+            return new_path
+        except OSError as e:
+            logger.error("Failed to rename file", extra={"file": file_path, "error": str(e)})
+            raise
+    return file_path
 
-# --- Ensure file name ends with _YYYY-MM (File only) ---
-def ensure_month_suffix(file_name: str, folder: str) -> str:  # file_ops.py
-    base, ext = os.path.splitext(file_name)
-    parts = base.split("_")
-    try:
-        # Check if last part is YYYY-MM
-        datetime.strptime(parts[-1], "%Y-%m")
-        return file_name  # already correct
-    except ValueError:
-        # Add current YYYY-MM
-        suffix = datetime.now().strftime("%Y-%m")
+def move_file(file_path, target_dir, suffix=None):
+    """Move file to target directory, avoiding duplicates by adding timestamp."""
+    os.makedirs(target_dir, exist_ok=True)
+    base, ext = os.path.splitext(os.path.basename(file_path))
+    if suffix:
         new_name = f"{base}_{suffix}{ext}"
-        old_path = os.path.join(folder, file_name)
-        new_path = os.path.join(folder, new_name)
-        os.rename(old_path, new_path)
-        logger.info(f"Renamed file {file_name} -> {new_name}")
-        return new_name
-
-# --- Move a single file to processed/failed folder ---
-def move_file(src_path: str, dest_folder: str, status: str) -> str:  # file_ops.py
-    os.makedirs(dest_folder, exist_ok=True)
-    base = os.path.basename(src_path)
-    for suffix in ["_processed", "_failed"]:
-        if suffix in base:
-            base = base.replace(suffix, "")
-    name, ext = os.path.splitext(base)
-    new_name = f"{name}_{status}{ext}"
-    dest_path = os.path.join(dest_folder, new_name)
-    shutil.move(src_path, dest_path)
-    logger.info(f"Moved {src_path} -> {dest_path}")
-    return dest_path
-
-# --- Archive a single file ---
-def archive_file(src_path: str, archive_folder: str) -> str:  # file_ops.py
-    os.makedirs(archive_folder, exist_ok=True)
-    dest_path = os.path.join(archive_folder, os.path.basename(src_path))
-    shutil.copy2(src_path, dest_path)
-    logger.info(f"Archived file: {dest_path}")
-    return dest_path
-
-# --- Ingest raw file ---
-import pandas as pd
-def ingest_file(file_path: str) -> pd.DataFrame | None:  # file_ops.py
+    else:
+        new_name = os.path.basename(file_path)
+    target_path = os.path.join(target_dir, new_name)
+    
+    # Handle duplicates by appending timestamp
+    counter = 1
+    while os.path.exists(target_path):
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        new_name = f"{base}_{suffix}_{timestamp}_{counter}{ext}" if suffix else f"{base}_{timestamp}_{counter}{ext}"
+        target_path = os.path.join(target_dir, new_name)
+        counter += 1
+    
     try:
-        if file_path.endswith(".csv"):
-            df = pd.read_csv(file_path)
-        elif file_path.endswith((".xls", ".xlsx")):
-            df = pd.read_excel(file_path)
-        elif file_path.endswith(".txt"):
-            df = pd.read_csv(file_path, delimiter="\t")
-        else:
-            logger.error(f"Unsupported file type: {file_path}")
-            return None
-        df["ingested_at"] = pd.Timestamp.now()
-        logger.info(f"Ingested file {file_path} with {len(df)} rows")
-        return df
-    except Exception as e:
-        logger.error(f"Failed to ingest {file_path}: {e}")
-        return None
+        os.rename(file_path, target_path)
+        logger.info("Moved file", extra={"original": file_path, "target": target_path})
+        return target_path
+    except OSError as e:
+        logger.error("Failed to move file", extra={"file": file_path, "target": target_path, "error": str(e)})
+        raise

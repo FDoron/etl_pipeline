@@ -1,79 +1,74 @@
 import os
-import sys
-
-# -------------------------------
-# Ensure project root in sys.path
-# -------------------------------
-PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from src.utils.logger import get_logger
+from src.utils.logger import logger
 from src.utils.config_loader import Config
-from src.ingestion.ingest import ingest_files, move_file, archive_file  # updated import
-from src.db.db_ops import insert_dataframe, create_processing_job, update_processing_job
+from src.ingestion.ingest import ingest_file
+from src.db.db_ops import init_db
+from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base
 
-logger = get_logger(__name__)
-config = Config.load("config/settings.yaml")
+Base = declarative_base()
 
+class ProcessingJob(Base):
+    __tablename__ = 'processing_jobs'
+    id = Column(Integer, primary_key=True)
+    file_name = Column(String)
+    status = Column(String)
+    rows_processed = Column(Integer)
+    rows_inserted = Column(Integer)
+    rows_failed = Column(Integer)
+    error_summary = Column(String)
 
 def main():
-    logger.info("Pipeline started.")
-
-    inbox_path = config["paths"]["inbox"]
-    processed_folder = config["paths"]["processed"]
-    failed_folder = config["paths"]["failed"]
-
-    # -------------------------------
-    # Ingest all files in folder
-    # -------------------------------
-    ingestion_results = ingest_files(inbox_path)
-
-    for result in ingestion_results:
-        file_name = result["file"]
-        status = result["status"]
-        errors = result["errors"]
-        rows = result["rows"]
-
-        # Extract provider and report_period from file name
-        provider = file_name.split("_")[0]
-        report_period = file_name.split("_")[-1].replace(".csv", "").replace(".xlsx", "")
-
-        # Create a processing job for this file
-        job_id = create_processing_job(file_name, provider, report_period)
-
-        if status == "SUCCESS":
-            # File was successfully validated, insert into DB
-            df = result.get("df")  # you may store df in result in ingest_files if needed
-            # If not stored, re-ingest the file to get df
-            df = ingest_file(os.path.join(inbox_path, file_name))  # safe re-read
-            df, valid, errors_check = normalize_and_validate(
-                df,
-                required_columns=config["required_columns"],
-                column_mapping=config["column_mapping"]
-            )
-            rows_inserted = insert_dataframe(df, provider, report_period, job_id)
-            update_processing_job(
-                job_id,
-                status="SUCCESS",
-                rows_processed=rows,
-                rows_inserted=rows_inserted,
-                rows_failed=0,
-                error_summary=None
-            )
-        else:
-            # Failed ingestion or validation
-            update_processing_job(
-                job_id,
-                status="FAILED",
-                rows_processed=rows,
+    # Load configuration
+    try:
+        Config.load('config/settings.yaml')  # Explicitly specify settings.yaml
+        connection_string = Config.get('db.connection_string')
+        if connection_string is None:
+            raise ValueError("Missing 'db.connection_string' in config/settings.yaml")
+        providers = Config.get('providers', {})
+        inbox_dir = Config.get('paths.inbox', 'data/inbox')
+    except (FileNotFoundError, RuntimeError, ValueError) as e:
+        logger.error("Configuration loading failed", extra={"error": str(e)})
+        return
+    
+    # Initialize database
+    try:
+        SessionLocal = init_db(connection_string)
+    except Exception as e:
+        logger.error("Database initialization failed", extra={"connection_string": connection_string, "error": str(e)})
+        return
+    
+    # Process files in inbox
+    for filename in os.listdir(inbox_dir):
+        file_path = os.path.join(inbox_dir, filename)
+        if not os.path.isfile(file_path):
+            continue
+        
+        # Create a new processing job
+        with SessionLocal() as session:
+            job = ProcessingJob(
+                file_name=filename,
+                status='PROCESSING',
+                rows_processed=0,
                 rows_inserted=0,
-                rows_failed=rows,
-                error_summary=str(errors)
+                rows_failed=0,
+                error_summary=''
             )
-
-    logger.info("Pipeline finished.")
-
+            session.add(job)
+            session.commit()
+            job_id = job.id
+            
+            # Ingest file
+            provider_key = filename.split('_')[0]  # e.g., provider1_data.csv -> provider1
+            provider_mapping = providers.get(provider_key, {})
+            success = ingest_file(file_path, provider_mapping, session, job_id)
+            
+            if success:
+                logger.info("File processed successfully", extra={"file": filename, "job_id": job_id})
+            else:
+                logger.error("File processing failed", extra={"file": filename, "job_id": job_id})
+                session.query(ProcessingJob).filter_by(id=job_id).update({'status': 'FAILED'})
 
 if __name__ == "__main__":
     main()
