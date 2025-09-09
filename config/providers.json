@@ -1,0 +1,11 @@
+{
+  "ProviderA": {
+    "inbox_path": "data/inbox/provider_a",
+    "columns": {
+      "CustomerID": ["ID", "CustID", "AccountNo"],
+      "CustomerName": ["Name", "FullName"],
+      "MonthlyFee": ["Fee", "Amount", "Charge"],
+      "ReportingMonth": ["Month", "Period"]
+    }
+  }
+}

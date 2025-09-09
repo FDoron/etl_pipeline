@@ -1,0 +1,30 @@
+db:
+  type: mysql
+  host: localhost
+  port: 3306
+  user: root
+  password: Letmein123$
+  database: dev_db
+
+logging:
+  level: INFO
+  file: "logs/pipeline.log"
+
+paths:
+  inbox: "data/raw"
+  processed: "data/processed"
+  failed: "data/failed"
+  archive: "data/archive"
+
+column_mapping:
+  מס_לקוח: customer_id
+  תז: customer_id
+  שם_לקוח: customer_name
+  שם: customer_name
+  דמי_חודש: fees
+  סכום: fees
+
+required_columns:
+  - customer_id
+  - customer_name
+  - fees
