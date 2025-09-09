@@ -8,53 +8,79 @@ logger = get_logger(__name__)
 config = Config.load("config/settings.yaml")
 
 
-def ingest_files(inbox_path: str):
+def ingest_files(folder_path: str):
+    """
+    Complete ingestion workflow for all files in a folder.
+    Returns list of dicts with file status, rows, errors.
+    """
     processed_folder = config["paths"]["processed"]
     failed_folder = config["paths"]["failed"]
     archive_folder = config["paths"]["archive"]
 
     results = []
-    files = [f for f in os.listdir(inbox_path) if os.path.isfile(os.path.join(inbox_path, f))]
+
+    files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
 
     for file in files:
-        # --- Ensure _YYYY-MM suffix ---
-        file_with_suffix = ensure_month_suffix(file, inbox_path)
-        full_path = os.path.join(inbox_path, file_with_suffix)
+        try:
+            # -------------------------------
+            # Ensure suffix _YYYY-MM (rename if needed)
+            # -------------------------------
+            file_with_suffix = ensure_month_suffix(file, folder_path)
+            full_path = os.path.join(folder_path, file_with_suffix)
 
-        # --- Archive original ---
-        archive_file(full_path, archive_folder)
+            # -------------------------------
+            # Archive original
+            # -------------------------------
+            archive_file(full_path, archive_folder)
 
-        # --- Ingest raw ---
-        df = ingest_file(full_path)
-        if df is None:
-            move_file(full_path, failed_folder, "failed")
-            results.append({"file": file_with_suffix, "status": "failed_ingest", "rows": 0})
-            continue
+            # -------------------------------
+            # Ingest raw file
+            # -------------------------------
+            df = ingest_file(full_path)
+            if df is None:
+                move_file(full_path, failed_folder, "failed")
+                results.append({
+                    "file": file_with_suffix,
+                    "status": "FAILED",
+                    "rows": 0,
+                    "errors": ["Failed to read file"]
+                })
+                continue
 
-        # --- Transform & validate ---
-        df, valid, errors = normalize_and_validate(
-            df,
-            required_columns=config["required_columns"],
-            column_mapping=config["column_mapping"]
-        )
+            # -------------------------------
+            # Transform & validate
+            # -------------------------------
+            df, valid, errors = normalize_and_validate(
+                df,
+                required_columns=config["required_columns"],
+                column_mapping=config["column_mapping"]
+            )
 
-        if valid:
-            move_file(full_path, processed_folder, "processed")
-            results.append({"file": file_with_suffix, "status": "processed", "rows": len(df)})
-        else:
-            move_file(full_path, failed_folder, "failed")
+            if valid:
+                move_file(full_path, processed_folder, "processed")
+                results.append({
+                    "file": file_with_suffix,
+                    "status": "SUCCESS",
+                    "rows": len(df),
+                    "errors": []
+                })
+            else:
+                move_file(full_path, failed_folder, "failed")
+                results.append({
+                    "file": file_with_suffix,
+                    "status": "FAILED",
+                    "rows": len(df),
+                    "errors": errors
+                })
+
+        except Exception as e:
+            logger.error(f"Unexpected error processing {file}: {e}")
             results.append({
-                "file": file_with_suffix,
-                "status": "failed_validation",
-                "rows": len(df),
-                "errors": errors
+                "file": file,
+                "status": "FAILED",
+                "rows": 0,
+                "errors": [str(e)]
             })
 
     return results
-
-
-if __name__ == "__main__":
-    inbox_path = config["paths"]["inbox"]
-    summary = ingest_files(inbox_path)
-    for s in summary:
-        print(s)
