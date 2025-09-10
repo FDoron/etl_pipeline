@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Text, Enum, ForeignKey, TIMESTAMP
+from sqlalchemy import create_engine, Column, Integer, String, Text, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
 import pandas as pd
 import json
@@ -30,14 +30,16 @@ class FailedRow(Base):
 
 class Reports(Base):
     __tablename__ = 'reports'
-    id = Column(String(50), primary_key=True)
+    row_id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(String(50), nullable=False)
     name = Column(String(255))
     fee = Column(Integer)
-    provider = Column(String(50), primary_key=True)
-    reportPeriod = Column(String(7), primary_key=True)
+    provider = Column(String(50), nullable=False)
+    reportPeriod = Column(String(7), nullable=False)
     ingested_at = Column(TIMESTAMP, default=datetime.utcnow)
     status = Column(String(20))
     job_id = Column(Integer, ForeignKey('processing_jobs.job_id'))
+    __table_args__ = (UniqueConstraint('id', 'provider', 'reportPeriod', name='uix_customer_provider_period'),)
 
 def init_db(connection_string):
     try:
@@ -62,17 +64,15 @@ def log_failed_row(session, job_id, row_number, errors):
 
 def insert_dataframe(session, df, table_name, job_id):
     try:
-        with session.begin():
-            df.to_sql(table_name, session.bind, if_exists='append', index=False)
-            session.query(ProcessingJob).filter_by(job_id=job_id).update({
-                'status': 'SUCCESS',
-                'rows_inserted': len(df),
-                'rows_failed': 0,
-                'finished_at': datetime.utcnow()
-            })
+        df.to_sql(table_name, session.bind, if_exists='append', index=False)
+        session.query(ProcessingJob).filter_by(job_id=job_id).update({
+            'status': 'SUCCESS',
+            'rows_inserted': len(df),
+            'rows_failed': 0,
+            'finished_at': datetime.utcnow()
+        })
         return True, None
     except Exception as e:
-        session.rollback()
         session.query(ProcessingJob).filter_by(job_id=job_id).update({
             'status': 'FAILED',
             'error_summary': str(e),
