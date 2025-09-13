@@ -25,16 +25,6 @@ def ingest_file(file_path, provider_mapping, session, job_id):
             move_file(file_path, 'data/failed', suffix='failed')
             return False
    
-        # Read CSV
-        # try:
-        #     df = pd.read_csv(file_path)
-        # except Exception as e:
-        #     logger.error("Failed to read CSV", extra={"file": file_path, "error": str(e)})
-        #     move_file(file_path, 'data/failed', suffix='failed')
-        #     return False
-        
-        # Normalize and validate
-        # valid_df, errors = normalize_and_validate(df, provider_mapping, session, job_id)
         valid_df, errors = normalize_and_validate(df, {'column_mapping': provider_mapping['column_mapping'], 'provider': provider_mapping['provider']}, session, job_id)
         
         # Update job status

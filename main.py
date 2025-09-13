@@ -1,3 +1,4 @@
+import re
 import os
 from src.utils.logger import logger
 from src.utils.config_loader import Config
@@ -5,7 +6,7 @@ from src.ingestion.ingest import ingest_file
 from src.db.db_ops import init_db, ProcessingJob
 from sqlalchemy.orm import Session
 from datetime import datetime
-from src.ingestion.file_ops import ensure_filename_suffix
+from src.ingestion.file_ops import ensure_filename_suffix, rename_file_with_id_column
 
 
 def redact_sensitive(data):
@@ -50,13 +51,12 @@ def main():
             continue
         
         with SessionLocal() as session:
-            # provider_key = filename.split('_')[0]
-            # Use current YYYY-MM as report_period
-            # report_period = datetime.now().strftime('%Y-%m')
-            file_path = ensure_filename_suffix(file_path)
             filename = os.path.basename(file_path)
-            provider_key = filename.split('_')[0] if '_' in filename else filename.split('.')[0]
-            report_period = filename.split('_')[-1].split('.')[0] if '_' in filename and filename.split('_')[-1].split('.')[0].replace('-', '').isdigit() else datetime.now().strftime('%m%Y')
+            # Split on whitespace or underscores, filter out stage suffixes and MMYYYY
+            parts = re.split(r'[\s_]+', filename)
+            parts = [p for p in parts if p not in ['failed', 'processed'] and not re.match(r'^\d{2}\d{4}$', p)]
+            provider_key = '_'.join(parts[:-1]) if parts else filename.split('.')[0]
+            report_period = next((p for p in parts if re.match(r'^\d{2}\d{4}$', p)), datetime.now().strftime('%m%Y'))
             provider_mapping = {'column_mapping': Config.get('column_mapping', {}), 'provider': provider_key}
             job = ProcessingJob(
                 file_name=filename,
@@ -71,7 +71,14 @@ def main():
             session.add(job)
             session.commit()
             job_id = job.job_id
+            rename_result = rename_file_with_id_column(file_path, session, job_id)
+            if not rename_result:
+                continue
+            file_path, majority_provider = rename_result
+            file_path = ensure_filename_suffix(file_path)
             
+            filename = os.path.basename(file_path)
+                        
             success = ingest_file(file_path, {'column_mapping': Config.get('column_mapping', {}), 'provider': provider_key}, session, job_id)
             
             if success:

@@ -25,6 +25,11 @@ column_mapping:
   סכום: fees
 
 required_columns:
-  - customer_id
-  - customer_name
-  - fees
+  - id
+  - first_name
+  - last_name
+  - name
+  - fee
+
+validation:
+  id_sample_size: 5

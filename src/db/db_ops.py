@@ -32,7 +32,8 @@ class Reports(Base):
     __tablename__ = 'reports'
     row_id = Column(Integer, primary_key=True, autoincrement=True)
     id = Column(String(50), nullable=False)
-    name = Column(String(255))
+    first_name = Column(String(255))
+    last_name = Column(String(255))
     fee = Column(Integer)
     provider = Column(String(50), nullable=False)
     reportPeriod = Column(String(7), nullable=False)
@@ -40,6 +41,13 @@ class Reports(Base):
     status = Column(String(20))
     job_id = Column(Integer, ForeignKey('processing_jobs.job_id'))
     __table_args__ = (UniqueConstraint('id', 'provider', 'reportPeriod', name='uix_customer_provider_period'),)
+    
+class Clients(Base):
+    __tablename__ = 'clients'
+    client_id = Column(String(9), primary_key=True)
+    first_name = Column(String(255), nullable=False)
+    last_name = Column(String(255), nullable=False)
+    provider = Column(String(255), nullable=False)
 
 def init_db(connection_string):
     try:
