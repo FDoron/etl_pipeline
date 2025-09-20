@@ -1,4 +1,4 @@
-db:
+database:
   type: mysql
   host: localhost
   port: 3306
@@ -33,3 +33,20 @@ required_columns:
 
 validation:
   id_sample_size: 5
+
+data_prep:
+  steps:
+    - isolate_table
+    - identify_id
+    - identify_provider
+    - find_date
+    - identify_fee
+  issue_threshold: 1
+  fee_values: [62, 30]
+  fee_outlier_threshold: 10
+  date_formats: ['%d-%m-%Y', '%d/%m/%Y', '%Y%m%d', '%m-%d-%Y', '%m/%d/%Y', '%b-%Y']
+  cutoff_day: 5
+  providers:
+    'ספק א': 'ספק_א'
+    'ספק ב': 'ספק_ב'
+    'ספק ג': 'ספק_ג'

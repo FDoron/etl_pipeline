@@ -1,9 +1,10 @@
-from sqlalchemy import create_engine, Column, Integer, String, Text, Enum, ForeignKey, TIMESTAMP, UniqueConstraint
+from sqlalchemy import create_engine as sa_create_engine, Column, Integer, String, DateTime, Text, Enum,ForeignKey,TIMESTAMP,UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
 import pandas as pd
 import json
 from src.utils.logger import logger
 from datetime import datetime
+from src.utils.config_loader import Config
 
 Base = declarative_base()
 
@@ -49,41 +50,58 @@ class Clients(Base):
     last_name = Column(String(255), nullable=False)
     provider = Column(String(255), nullable=False)
 
-def init_db(connection_string):
+def init_db(engine):
+    """Initialize the database by creating all defined tables."""
     try:
-        engine = create_engine(connection_string)
-        # Create tables in correct order
-        ProcessingJob.__table__.create(engine, checkfirst=True)
-        FailedRow.__table__.create(engine, checkfirst=True)
-        Reports.__table__.create(engine, checkfirst=True)
-        return sessionmaker(bind=engine)
+        Base.metadata.create_all(engine)
+        logger.info("Database tables initialized successfully")
     except Exception as e:
-        logger.error("Database table creation failed", extra={"error": str(e)})
+        logger.error(f"Failed to initialize database: {str(e)}")
         raise
 
-def log_failed_row(session, job_id, row_number, errors):
-    failed_row = FailedRow(
-        job_id=job_id,
-        row_number=row_number,
-        error_details=json.dumps(errors)
+def create_engine():
+    """Create a SQLAlchemy engine from configuration."""
+    db_config = Config.get('database', {})
+    connection_string = (
+        f"mysql+mysqlconnector://{db_config.get('user')}:{db_config.get('password')}@"
+        f"{db_config.get('host')}:{db_config.get('port')}/{db_config.get('database')}"
     )
-    session.add(failed_row)
-    session.commit()
+    try:
+        return sa_create_engine(connection_string)
+    except Exception as e:
+        logger.error(f"Failed to create engine: {str(e)}")
+        raise
+
+def create_session(engine):
+    """Create a SQLAlchemy session bound to the provided engine."""
+    try:
+        Session = sessionmaker(bind=engine)
+        return Session()
+    except Exception as e:
+        logger.error(f"Failed to create session: {str(e)}")
+        raise
+
+def log_failed_row(session, job_id, row, reason):
+    """Log a failed row to the database or a log file."""
+    try:
+        # Assuming a failed_rows table or log file; adjust as per your implementation
+        logger.error(f"Failed row for job_id={job_id}: {row.to_dict()}, reason: {reason}")
+        # Example: Insert into a failed_rows table (uncomment if applicable)
+        # session.execute("INSERT INTO failed_rows (job_id, row_data, reason) VALUES (:job_id, :row_data, :reason)",
+        #                 {'job_id': job_id, 'row_data': str(row.to_dict()), 'reason': reason})
+        session.commit()
+    except Exception as e:
+        logger.error(f"Failed to log failed row for job_id={job_id}: {str(e)}")
+        session.rollback()
+        raise
 
 def insert_dataframe(session, df, table_name, job_id):
+    """Insert DataFrame rows into the specified table."""
     try:
-        df.to_sql(table_name, session.bind, if_exists='append', index=False)
-        session.query(ProcessingJob).filter_by(job_id=job_id).update({
-            'status': 'SUCCESS',
-            'rows_inserted': len(df),
-            'rows_failed': 0,
-            'finished_at': datetime.utcnow()
-        })
+        df.to_sql(table_name, con=session.bind, if_exists='append', index=False)
+        logger.info(f"Inserted {len(df)} rows into {table_name} for job_id={job_id}")
         return True, None
     except Exception as e:
-        session.query(ProcessingJob).filter_by(job_id=job_id).update({
-            'status': 'FAILED',
-            'error_summary': str(e),
-            'finished_at': datetime.utcnow()
-        })
+        logger.error(f"Failed to insert data to {table_name} for job_id={job_id}: {str(e)}")
         return False, str(e)
+

@@ -1,0 +1,116 @@
+{
+  "respondent_id": "user123",
+  "questionnaire_id": "QNR001",
+  "answers": [
+    {
+      "question": "שבתון",
+      "answer": "Yes",
+      "sub_answers": [
+        {"question": "fund", "answer": "קרן השתלמות"}, # other options: קרן עגור, קרן על יסודי
+        {
+          "question": "Attachment",
+          "attachments": [
+            {"file_url": "/files/xx1.pdf", "file_type": "pdf"},
+            {"file_url": "/files/xx2.jpg", "file_type": "jpg"}
+          ]
+        }
+      ]
+    },
+    {
+      "question": "חלת",
+      "answer": "No",
+      "sub_answers": [
+        {
+          "question": "Attachment",
+          "attachments": [
+            {"file_url": "/files/xx.pdf", "file_type": "pdf"},
+          ]
+        }
+      ]
+    },
+    {
+      "question": "חופשת לידה",
+      "answer": "No",
+      "sub_answers": [
+        {"question": "עד מועד הלידה המשוער", "answer": "כן"}, # other options: לא
+        {"question": "תאריך יציאה", "answer": "dd/mm/yyyy"},
+        {"question": "תאריך חזרה", "answer": "dd/mm/yyyy"},
+        {
+          "question": "Attachment",
+          "attachments": [
+            {"file_url": "/files/xx1.pdf", "file_type": "pdf"},
+          ]
+        }
+      ]
+    },
+    {
+      "question": "שמירת הריון",
+      "answer": "No",
+      "sub_answers": [
+        {"question": "עד מועד הלידה המשוער", "answer": "כן"}, # other options: לא
+        {"question": "תאריך יציאה", "answer": "dd/mm/yyyy"},
+        {"question": "תאריך חזרה", "answer": "dd/mm/yyyy"},
+        {"question": "משך החופשה", "answer": "9"},
+        {
+          "question": "Attachment",
+          "attachments": [
+            {"file_url": "/files/xx1.pdf", "file_type": "pdf"},
+          ]
+        }
+      ]
+    },
+    {
+      "question": "גימלאות",
+      "answer": "No",
+    },
+    {
+      "question": "החלפת מעסיק",
+      "answer": "No",
+      "sub_answers": [
+        {
+          "question": "Attachment",
+          "attachments": [
+            {"file_url": "/files/xx.pdf", "file_type": "pdf"},
+          ]
+        }
+      ]
+    },
+    {
+      "question": "לא ידוע",
+      "answer": "No",
+      "sub_answers": [
+        {"question": "known by error", "answer": "כן"}, # other options: לא
+        {
+          "question": "Attachment",
+          "attachments": [
+            {"file_url": "/files/xx1.pdf", "file_type": "pdf"},
+          ]
+        }
+      ]
+    },
+    {
+      "question": "אובדן כושר עבודה",
+      "answer": "No",
+      "sub_answers": [
+        {
+          "question": "Attachment",
+          "attachments": [
+            {"file_url": "/files/xx.pdf", "file_type": "pdf"},
+          ]
+        }
+      ]
+    },
+    {
+      "question": "גבייה",
+      "answer": "No",
+      "sub_answers": [
+        {
+          "question": "Attachment",
+          "attachments": [
+            {"file_url": "/files/xx.pdf", "file_type": "pdf"},
+          ]
+        }
+      ]
+    },
+  ]
+}
