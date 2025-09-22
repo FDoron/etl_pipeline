@@ -13,3 +13,4 @@ logger = setup_logger()
 
 def log_action(action, details):
     logger.info(action, extra=details)
+    

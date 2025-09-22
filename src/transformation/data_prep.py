@@ -9,6 +9,7 @@ from src.utils.utils import find_id_column, is_valid_israeli_id
 from src.db.db_ops import Clients
 from sqlalchemy.orm import sessionmaker
 from charset_normalizer import detect
+import shutil
 
 
 def prepare_data(df, provider_mapping, session, job_id):
@@ -32,25 +33,37 @@ def prepare_data(df, provider_mapping, session, job_id):
         func = step_functions.get(step)
         if not func:
             logger.error(f"Step {step} not implemented for job_id={job_id}")
-            return {'status': 'failed', 'df': None, 'reason': f'Step {step} not implemented'}
+            # return {'status': 'failed', 'df': None, 'reason': f'Step {step} not implemented'}
+            return {'status': 'failed', 'df': None, 'reason': f'Step {step} not implemented', 'outliers': pd.DataFrame()}
         status, df, reason = func(df, provider_mapping, session, job_id, config)
         logger.info(f"Step {step}: status={status}, reason={reason}, shape={df.shape if df is not None else None}", extra={"job_id": job_id})
         if status == 'failed':
-            return {'status': 'failed', 'df': None, 'reason': reason}
+            # return {'status': 'failed', 'df': None, 'reason': reason}
+            return {'status': 'failed', 'df': None, 'reason': reason, 'outliers': pd.DataFrame()}
         if status == 'managed':
             managed_count += 1
             if managed_count > config.get('issue_threshold', 1):
                 return {'status': 'failed', 'df': None, 'reason': 'Too many managed issues'}
-    return {'status': 'ok', 'df': df, 'reason': 'All steps completed'}
+    # return {'status': 'ok', 'df': df, 'reason': 'All steps completed'}
+    return {'status': 'ok', 'df': df, 'reason': 'All steps completed', 'outliers': pd.DataFrame()}
 
 def _isolate_table_step(df, provider_mapping, session, job_id, config):
     df = df.dropna(how='all').dropna(axis=1, how='all')
-    if not df.iloc[0].str.contains('מס_לקוח|תז|שם|דמי|סכום', na=False, regex=True).any():
-        logger.warning(f"No recognizable headers in file for job_id={job_id}")
+    # Find first row with mostly non-null values as table start
+    non_null_threshold = config.get('validation', {}).get('non_null_threshold', 0.5)
+    start_row = 0
+    for i, row in df.iterrows():
+        if row.notna().sum() / len(row) >= non_null_threshold:
+            start_row = i
+            break
+    if start_row > 0:
+        logger.info(f"Table starts at row {start_row}, skipping title rows", extra={"job_id": job_id})
+        df = df.iloc[start_row:].reset_index(drop=True)
+    # Assign generic column names if headers are unclear (e.g., mostly numeric or short)
+    if df.iloc[0].str.isnumeric().any() or df.iloc[0].str.len().mean() < 3:
+        logger.warning(f"No clear headers in file for job_id={job_id}")
         df.columns = [f'col_{i}' for i in range(len(df.columns))]
-        status = 'managed'
-    else:
-        status = 'ok'
+    status = 'ok'
     # Check for sporadic values
     non_mapped_cols = [col for col in df.columns if col not in provider_mapping.get('column_mapping', {}).keys()]
     sporadic_rows = df[non_mapped_cols].isna().sum(axis=1) > len(non_mapped_cols) * 0.5
@@ -65,95 +78,192 @@ def _isolate_table_step(df, provider_mapping, session, job_id, config):
 
 def _identify_id_step(df, provider_mapping, session, job_id, config):
     sample_size = min(config.get('validation.id_sample_size', 5), len(df))
+    id_columns = config.get('data_prep', {}).get('id_columns', [])
+    
+    logger.debug(f"Starting ID identification: columns={list(df.columns)}, dtypes={df.dtypes.to_dict()}, sample_size={sample_size}", extra={"job_id": job_id})
+    
     id_column = None
+    # Step 1: Check columns in id_columns for Israeli ID format
     for col in df.columns:
-        sample = df[col].dropna().sample(n=min(sample_size, len(df[col].dropna())), random_state=42).astype(str)
-        valid_count = 0
-        # for val in sample:
-        #     if re.match(r'^\d{9}$', val):
-        #         if is_valid_israeli_id(val):
-        #             valid_count += 1
-        #     elif re.match(r'^\d{8}-\d{1}$', val):
-        #         cleaned_val = val.replace('-', '')
-        #         if is_valid_israeli_id(cleaned_val):
-        #             valid_count += 1
-        #             df[col] = df[col].astype(str).str.replace('-', '', regex=True)
-
-        for val in sample:
-            if re.match(r'^\d{7,9}$', val):
-                padded_val = val.zfill(9)
-                if is_valid_israeli_id(padded_val):
-                    valid_count += 1
-                    df[col] = df[col].astype(str).apply(lambda x: x.zfill(9) if re.match(r'^\d{7,9}$', x) else x)
+        if col.lower() in [c.lower() for c in id_columns]:
+            sample = df[col].dropna().sample(n=min(sample_size, len(df[col].dropna())), random_state=42).astype(str)
+            valid_count = 0
+            for val in sample:
+                if re.match(r'^\d{7,9}$', val):
+                    padded_val = val.zfill(9)
+                    if is_valid_israeli_id(padded_val):
+                        valid_count += 1
+                        df[col] = df[col].astype(str).apply(lambda x: x.zfill(9) if re.match(r'^\d{7,9}$', x) else x)
+                    else:
+                        logger.debug(f"Invalid ID in {col}: {padded_val} (raw: {val})", extra={"job_id": job_id})
+                elif re.match(r'^\d{8}-\d{1}$', val):
+                    cleaned_val = val.replace('-', '')
+                    if is_valid_israeli_id(cleaned_val):
+                        valid_count += 1
+                        df[col] = df[col].astype(str).str.replace('-', '', regex=True)
+                    else:
+                        logger.debug(f"Invalid hyphenated ID in {col}: {cleaned_val} (raw: {val})", extra={"job_id": job_id})
                 else:
-                    logger.debug(f"Invalid ID in {col}: {padded_val} (raw: {val})", extra={"job_id": job_id})
-            elif re.match(r'^\d{8}-\d{1}$', val):
-                cleaned_val = val.replace('-', '')
-                if is_valid_israeli_id(cleaned_val):
-                    valid_count += 1
-                    df[col] = df[col].astype(str).str.replace('-', '', regex=True)
+                    logger.debug(f"Non-numeric or malformed ID in {col}: {val}", extra={"job_id": job_id})
+            if valid_count / len(sample) >= 0.8:  # Relaxed to 80% to handle noise
+                id_column = col
+                logger.debug(f"Found ID column {col} by Israeli ID validation (named)", extra={"job_id": job_id})
+                break
+    
+    # Step 2: If no ID column found, check all columns for Israeli ID format
+    if not id_column:
+        for col in df.columns:
+            sample = df[col].dropna().sample(n=min(sample_size, len(df[col].dropna())), random_state=42).astype(str)
+            valid_count = 0
+            for val in sample:
+                if re.match(r'^\d{7,9}$', val):
+                    padded_val = val.zfill(9)
+                    if is_valid_israeli_id(padded_val):
+                        valid_count += 1
+                        df[col] = df[col].astype(str).apply(lambda x: x.zfill(9) if re.match(r'^\d{7,9}$', x) else x)
+                    else:
+                        logger.debug(f"Invalid ID in {col}: {padded_val} (raw: {val})", extra={"job_id": job_id})
+                elif re.match(r'^\d{8}-\d{1}$', val):
+                    cleaned_val = val.replace('-', '')
+                    if is_valid_israeli_id(cleaned_val):
+                        valid_count += 1
+                        df[col] = df[col].astype(str).str.replace('-', '', regex=True)
+                    else:
+                        logger.debug(f"Invalid hyphenated ID in {col}: {cleaned_val} (raw: {val})", extra={"job_id": job_id})
                 else:
-                    logger.debug(f"Invalid hyphenated ID in {col}: {cleaned_val} (raw: {val})", extra={"job_id": job_id})
-            else:
-                logger.debug(f"Non-numeric or malformed ID in {col}: {val}", extra={"job_id": job_id})
-        if valid_count == len(sample):
-            id_column = col
-            break
+                    logger.debug(f"Non-numeric or malformed ID in {col}: {val}", extra={"job_id": job_id})
+            if valid_count / len(sample) >= 0.8:  # Relaxed to 80% to handle noise
+                id_column = col
+                logger.debug(f"Found ID column {col} by Israeli ID validation (unnamed)", extra={"job_id": job_id})
+                break
+    
     if not id_column:
         logger.error(f"No valid ID column found for job_id={job_id}")
-        return 'failed', None, 'No valid ID column found'
-    df = df.rename(columns={id_column: 'id'})
+        return 'error', df, 'No valid ID column found'
+    
+    df = df.rename(columns={id_column: 'ID'})
+    logger.info(f"ID column identified: {id_column}", extra={"job_id": job_id})
     return 'ok', df, f'ID column identified: {id_column}'
 
 def _identify_fee_step(df, provider_mapping, session, job_id, config):
     sample_size = min(config.get('validation.id_sample_size', 5), len(df))
+    id_columns = config.get('data_prep', {}).get('id_columns', [])
+    fee_columns = config.get('data_prep', {}).get('fee_columns', [])
     fee_values = config.get('fee_values', [62, 30])
     fee_outlier_threshold = config.get('fee_outlier_threshold', 10)
-    fee_column = None
+    fee_valid_threshold = config.get('data_prep', {}).get('fee_valid_threshold', 0.7)
+    non_numeric_threshold = config.get('data_prep', {}).get('non_numeric_threshold', 0.1)
+    
     clean_df = df.copy()
+    fee_column = None
     problematic_rows = None
     
     logger.debug(f"Starting fee identification: columns={list(df.columns)}, dtypes={df.dtypes.to_dict()}, sample_size={sample_size}, fee_values={fee_values}", extra={"job_id": job_id})
     
-    for col in df.columns:
-        sample_numeric = pd.to_numeric(df[col].dropna(), errors='coerce')
-        if sample_numeric.isna().sum() > 0:
-            logger.debug(f"Column {col} has {sample_numeric.isna().sum()} non-numeric values: {df[col].dropna().tolist()[:5]}", extra={"job_id": job_id})
-            continue
-        sample = sample_numeric.sample(n=min(sample_size, len(sample_numeric.dropna())), random_state=42)
-        logger.debug(f"Column {col} sample: {sample.tolist()}, dtype: {sample.dtype}", extra={"job_id": job_id})
-        
-        # Count outliers (NaN or not in fee_values)
-        outliers = df[col].isna() | ~df[col].astype(str).isin([str(v) for v in fee_values])
-        outlier_count = outliers.sum()
-        logger.debug(f"Column {col} has {outlier_count} outliers (not in {fee_values} or empty)", extra={"job_id": job_id})
-        
-        if outlier_count > fee_outlier_threshold:
-            logger.debug(f"Skipping {col}: too many outliers ({outlier_count} > {fee_outlier_threshold})", extra={"job_id": job_id})
-            continue
-            
-        if outlier_count <= fee_outlier_threshold:
-            fee_column = col
-            if outlier_count > 0:
-                problematic_rows = df[outliers].copy()
-                clean_df = df[~outliers].copy()
-                provider = clean_df.get('provider', clean_df.get('col_4', pd.Series())).iloc[0] if ('provider' in clean_df.columns or 'col_4' in clean_df.columns) else 'unknown'
-                manual_file = f"data/processed/iutuit5_manual_{provider}_092025.xlsx"
-                problematic_rows.to_excel(manual_file, index=False)
-                logger.info(f"Saved {outlier_count} problematic rows to {manual_file}", extra={"job_id": job_id})
-            break
+    # Archive original file
+    file_path = provider_mapping.get('file_path', 'unknown_file')
+    archive_dir = 'data/archive'
+    os.makedirs(archive_dir, exist_ok=True)
+    archive_path = os.path.join(archive_dir, f"{os.path.basename(file_path).rsplit('.', 1)[0]}_archive_{datetime.now().strftime('%m%Y')}.xlsx")
+    try:
+        shutil.copy(file_path, archive_path)
+        logger.info(f"Archived {file_path} to {archive_path}", extra={"job_id": job_id})
+    except Exception as e:
+        logger.error(f"Failed to archive {file_path}: {str(e)}", extra={"job_id": job_id})
     
+    def validate_fee_column(col, df, sample_size, fee_values, fee_valid_threshold, non_numeric_threshold):
+        # Initial sample check for numeric and length
+        sample = df[col].dropna().sample(n=min(sample_size, len(df[col].dropna())), random_state=42).astype(str)
+        if not sample.str.isnumeric().all():
+            logger.debug(f"Column {col} has non-numeric values in sample: {sample.tolist()[:5]}", extra={"job_id": job_id})
+            return False
+        if sample.str.len().max() > 6:
+            logger.debug(f"Column {col} has values >6 digits in sample: {sample.tolist()[:5]}", extra={"job_id": job_id})
+            return False
+        # Validate full column
+        cleaned_values = df[col].astype(str).str.strip()
+        sample_numeric = pd.to_numeric(cleaned_values, errors='coerce').astype(float)
+        if sample_numeric.isna().sum() / len(sample_numeric) > non_numeric_threshold:
+            logger.debug(f"Column {col} has {sample_numeric.isna().sum()} non-numeric values: {cleaned_values.tolist()[:5]}", extra={"job_id": job_id})
+            return False
+        non_nan_values = sample_numeric.dropna()
+        valid_count = sum(1 for val in non_nan_values if not pd.isna(val) and float(val) in [float(v) for v in fee_values])
+        logger.debug(f"Column {col} full stats: valid={valid_count}/{len(non_nan_values)}, non_numeric={sample_numeric.isna().sum()}", extra={"job_id": job_id})
+        return valid_count / len(non_nan_values) >= fee_valid_threshold
+    
+    # Step 1: Check if headers exist and match fee_columns
+    has_headers = not all(col.startswith('col_') for col in df.columns)
+    fee_column = None
+    if has_headers:
+        for col in df.columns:
+            if col.lower() in [c.lower() for c in fee_columns]:
+                if validate_fee_column(col, df, sample_size, fee_values, fee_valid_threshold, non_numeric_threshold):
+                    fee_column = col
+                    logger.debug(f"Found fee column {col} by name match", extra={"job_id": job_id})
+                    break
+
+    # Step 2: If no fee column found, check all columns based on sample
+    if not fee_column:
+        for col in df.columns:
+            if col.lower() in [c.lower() for c in id_columns]:
+                logger.debug(f"Skipping {col}: matches ID column", extra={"job_id": job_id})
+                continue
+            # Check sample for possibility
+            sample = df[col].dropna().sample(n=min(sample_size, len(df[col].dropna())), random_state=42).astype(str)
+            # Skip if sample consists of characters (non-numeric)
+            if not sample.str.isnumeric().all():
+                continue
+            # Skip if string or number is longer than 6 digits
+            if sample.str.len().max() > 6:
+                continue
+            # If promising, validate full column
+            if validate_fee_column(col, df, sample_size, fee_values, fee_valid_threshold, non_numeric_threshold):
+                fee_column = col
+                logger.debug(f"Found fee column {col} by value check", extra={"job_id": job_id})
+                break
+    
+    # Step 3: Handle fee column or fail
     if not fee_column:
         logger.error(f"No valid fee column found for job_id={job_id}", extra={"job_id": job_id})
-        return 'managed', clean_df, 'No valid fee column found'
+        return 'error', clean_df, 'No valid fee column found'
     
+    # Step 4: Process outliers
+    cleaned_values = df[fee_column].astype(str).str.strip()
+    sample_numeric = pd.to_numeric(cleaned_values, errors='coerce').astype(float)
+    outliers = df[sample_numeric.isna() | ~sample_numeric.isin([float(v) for v in fee_values]) | cleaned_values.str.strip() == '']
+    outlier_count = len(outliers)
+    max_outliers = min(fee_outlier_threshold, len(df))
+    
+    # Log outliers by type and row index
+    for idx, row in outliers.iterrows():
+        val = row[fee_column]
+        row_dict = row.to_dict()  # Explicitly convert Series to dict
+        if pd.isna(val) or str(val).strip() == '':
+            logger.debug(f"Outlier in {fee_column} at row {idx}: empty/null", extra={"job_id": job_id, "row_data": str(row_dict)})
+        elif pd.isna(pd.to_numeric(str(val).strip(), errors='coerce')):
+            logger.debug(f"Outlier in {fee_column} at row {idx}: non-numeric ({val})", extra={"job_id": job_id, "row_data": str(row_dict)})
+        else:
+            logger.debug(f"Outlier in {fee_column} at row {idx}: not in fee_values ({val})", extra={"job_id": job_id, "row_data": str(row_dict)})
+
     clean_df = clean_df.rename(columns={fee_column: 'fee'})
     logger.info(f"Fee column identified: {fee_column}, {outlier_count} outliers handled", extra={"job_id": job_id})
-    return 'ok', clean_df, f'Fee column identified: {fee_column}'
+
+    # status = 'error' if outlier_count > max_outliers else 'ok'
+    # processed_df = clean_df if outlier_count == 0 else df[~df.index.isin(outliers.index)].copy()
+    # reason = f"Fee column identified: {fee_column}, {outlier_count} outliers handled"
+    # return status, processed_df, reason
+    return {
+        'status': 'error' if outlier_count > max_outliers else 'ok',
+        'df': clean_df if outlier_count == 0 else df[~df.index.isin(outliers.index)].copy(),
+        'reason': f"Fee column identified: {fee_column}, {outlier_count} outliers handled",
+        'outliers': outliers
+    }
+
 
 def _find_date_step(df, provider_mapping, session, job_id, config):
-    date_formats = config.get('date_formats', ['%d-%m-%Y', '%d/%m/%Y', '%d%m%Y', '%m-%d-%Y', '%m/%d/%Y', '%b-%Y'])
+    date_formats = config.get('date_formats', ['%d-%m-%Y', '%d/%m/%Y', '%Y%m%d', '%m-%d-%Y', '%m/%d/%Y', '%b-%Y'])
     sample_size = min(config.get('validation.id_sample_size', 5), len(df))
+    date_column_threshold = config.get('validation', {}).get('date_column_threshold', 0.7)
     current_date = datetime.now()
     cutoff_day = config.get('cutoff_day', 5)
     target_month = current_date.strftime('%m-%Y') if current_date.day >= cutoff_day else (current_date.replace(month=current_date.month - 1)).strftime('%m-%Y')
@@ -175,7 +285,7 @@ def _find_date_step(df, provider_mapping, session, job_id, config):
                         break
                 except (ValueError, TypeError):
                     continue
-        if len(parsed_dates) / len(sample) > 0.7:
+        if len(parsed_dates) / len(sample) >= date_column_threshold:
             date_column = col
             df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%m-%Y')
             break
@@ -185,9 +295,10 @@ def _find_date_step(df, provider_mapping, session, job_id, config):
         logger.info(f"Date column identified: {date_column}, formatted as mm-YYYY", extra={"job_id": job_id})
         return 'ok', df, f'Date column identified: {date_column}'
     
-    logger.warning(f"No date column found, setting paid_month to {target_month}", extra={"job_id": job_id})
-    df['paid_month'] = target_month
-    return 'managed', df, f'No date column, set to {target_month}'
+    report_period = config.get('report_period', target_month)
+    logger.info(f"No date column found, setting paid_month to {report_period}", extra={"job_id": job_id})
+    df['paid_month'] = report_period
+    return 'ok', df, f'No date column, set to {report_period}'
 
 def _identify_provider_step(df, provider_mapping, session, job_id, config):
     providers = config.get('data_prep.providers', {})
@@ -227,7 +338,7 @@ def _identify_provider_step(df, provider_mapping, session, job_id, config):
     logger.info(f"No provider column found for job_id={job_id}")
     return 'managed', df, 'No provider column, will use ID-based provider identification'
 
-def _find_date_step(df, provider_mapping, session, job_id, config):
+
     date_formats = config.get('date_formats', ['%d-%m-%Y', '%d/%m/%Y', '%Y%m%d', '%m-%d-%Y', '%m/%d/%Y', '%b-%Y'])
     current_date = datetime.now()
     current_month = current_date.month
@@ -255,17 +366,17 @@ def _find_date_step(df, provider_mapping, session, job_id, config):
                         break
                 except ValueError:
                     continue
-        if len(parsed_dates) / len(sample) > 0.7:
-            month_counts = Counter([d.month for d in parsed_dates])
-            majority_month = month_counts.most_common(1)[0][1] / len(parsed_dates)
-            if majority_month > 0.7:
-                date_column = col
-                break
+        threshold = config.get('validation', {}).get('date_column_threshold', 0.7)
+        if len(parsed_dates) / len(sample) >= threshold:  # Use config threshold
+            date_column = col
+            df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%m-%Y')
+            break
     if date_column:
         df[date_column] = df[date_column].astype(str).apply(lambda x: datetime.strptime(x, next(fmt for fmt in date_formats if not pd.isna(datetime.strptime(x, fmt, errors='ignore')))).strftime('%m-%Y') if pd.notna(x) else None)
         logger.info(f"Date column identified: {date_column}", extra={"job_id": job_id})
         return 'ok', df, f'Date column identified: {date_column}'
     else:
-        logger.info(f"No date column found, setting to {target_date.strftime('%m-%Y')}", extra={"job_id": job_id})
-        df['paid_month'] = target_date.strftime('%m-%Y')
-        return 'managed', df, 'No date column, set to current month'
+        report_period = config.get('report_period', target_month)  # Use report_period from main.py
+        logger.info(f"No date column found, setting paid_month to {report_period}", extra={"job_id": job_id})
+        df['paid_month'] = pd.to_datetime(report_period, format='%m%Y').strftime('%m-%Y')  # Convert 092025 to mm-YYYY
+        return 'ok', df, f'No date column, set to {report_period}'

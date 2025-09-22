@@ -33,6 +33,10 @@ required_columns:
 
 validation:
   id_sample_size: 5
+  date_column_threshold: 0.7
+  issue_threshold: 2
+  non_null_threshold: 0.5  # Fraction of non-null values to identify data row
+  header_patterns: ['מס_לקוח', 'תז', 'שם', 'דמי', 'סכום']
 
 data_prep:
   steps:
@@ -50,3 +54,5 @@ data_prep:
     'ספק א': 'ספק_א'
     'ספק ב': 'ספק_ב'
     'ספק ג': 'ספק_ג'
+  id_columns: ['id', 'customer_id', 'מס_לקוח', 'תז']
+  fee_columns: ['fee', 'amount', 'cost', 'דמי', 'סכום']

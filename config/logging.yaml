@@ -2,22 +2,19 @@ version: 1
 formatters:
   json:
     class: pythonjsonlogger.jsonlogger.JsonFormatter
-    format: '%(asctime)s %(levelname)s %(name)s %(message)s'
+    format: '{"asctime": "%(asctime)s", "levelname": "%(levelname)s", "name": "%(name)s", "filename": "%(filename)s", "lineno": %(lineno)d, "message": "%(message)s", %(extra)s}'
 handlers:
   file:
-    class: logging.handlers.RotatingFileHandler
+    class: logging.FileHandler
+    filename: C:/projects/etl_pipeline/logs/etl_pipeline.log
     formatter: json
-    filename: logs/etl_pipeline.log
-    maxBytes: 10485760  # 10MB
-    backupCount: 5
+    level: DEBUG
   console:
     class: logging.StreamHandler
     formatter: json
+    level: DEBUG
 loggers:
   etl_pipeline:
-    level: INFO
+    level: DEBUG
     handlers: [file, console]
     propagate: false
-root:
-  level: WARNING
-  handlers: [console]

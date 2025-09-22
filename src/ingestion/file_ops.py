@@ -2,7 +2,6 @@ import os
 import pandas as pd
 from datetime import datetime
 from src.utils.logger import logger
-from src.utils.logger import logger
 from src.utils.config_loader import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,6 +9,8 @@ from src.db.db_ops import Clients
 from collections import Counter
 from src.db.db_ops import ProcessingJob
 from src.utils.utils import find_id_column, is_valid_israeli_id
+import shutil
+import logging
 
 
 def ensure_filename_suffix(file_path):
@@ -168,3 +169,55 @@ def move_file(file_path, target_dir, suffix=None):
     except OSError as e:
         logger.error("Failed to move file", extra={"file": file_path, "target": target_path, "error": str(e)})
         raise
+
+
+def handle_fee_outliers(result):
+    """Handle outlier saving and return updated df and status."""
+    logger = logging.getLogger(__name__)
+    df = result['df']
+    outliers = result['outliers']
+    outlier_count = result['outlier_count']
+    max_outliers = result['max_outliers']
+    job_id = result['job_id']
+    file_path = result['file_path']
+    provider = result['provider']
+    
+    # Construct dynamic filename
+    filename = os.path.basename(file_path)
+    base, _ = os.path.splitext(filename)
+    base_filename = f"{base}_{provider}_{datetime.now().strftime('%m%Y')}"
+    
+    # Archive original file
+    archive_dir = 'data/archive'
+    os.makedirs(archive_dir, exist_ok=True)
+    archive_path = os.path.join(archive_dir, f"{base}_archive_{datetime.now().strftime('%m%Y')}.xlsx")
+    try:
+        shutil.copy(file_path, archive_path)
+        logger.info(f"Archived {file_path} to {archive_path}", extra={"job_id": job_id})
+    except Exception as e:
+        logger.error(f"Failed to archive {file_path}: {str(e)}", extra={"job_id": job_id})
+    
+    # Handle outliers
+    if outlier_count > max_outliers:
+        failed_file = f"data/failed/{base_filename}_failed.xlsx"
+        os.makedirs('data/failed', exist_ok=True)
+        df.to_excel(failed_file, index=False)
+        logger.error(f"Too many outliers ({outlier_count}), saved to {failed_file}", extra={"job_id": job_id})
+        return {'status': 'failed', 'df': df}
+    
+    if outlier_count > 0:
+        problematic_rows = outliers.copy()
+        success_file = f"data/processed/{base_filename}_1_success.xlsx"
+        attention_file = f"data/staging/{base_filename}_2_attention.xlsx"
+        os.makedirs('data/processed', exist_ok=True)
+        os.makedirs('data/staging', exist_ok=True)
+        df.to_excel(success_file, index=False)
+        problematic_rows.to_excel(attention_file, index=False)
+        logger.info(f"Saved {len(df)} rows to {success_file}, {outlier_count} outliers to {attention_file}", extra={"job_id": job_id})
+    else:
+        success_file = f"data/processed/{base_filename}_success.xlsx"
+        os.makedirs('data/processed', exist_ok=True)
+        df.to_excel(success_file, index=False)
+        logger.info(f"Saved {len(df)} rows to {success_file}, no outliers", extra={"job_id": job_id})
+    
+    return {'status': 'ok', 'df': df}

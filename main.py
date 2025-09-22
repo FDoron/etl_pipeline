@@ -9,6 +9,10 @@ from src.ingestion.file_ops import rename_file_with_id_column, ensure_filename_s
 from src.ingestion.ingest import ingest_file
 
 
+from src.utils import file_ops
+
+
+
 def extract_provider_and_period(filename):
     """Extract provider and report period from filename."""
     parts = re.split(r'[\s_]+', filename)
@@ -54,16 +58,41 @@ def process_file(file_path, session):
     file_path = ensure_filename_suffix(file_path)
     
     # Ingest file
-    success = ingest_file(file_path, {'column_mapping': Config.get('column_mapping', {}), 'provider': majority_provider}, session, job_id)
+    success = ingest_file(file_path, {'column_mapping': Config.get('column_mapping', {}), 'provider': majority_provider, 'report_period': report_period}, session, job_id)
     if not success:
         logger.error(f"Ingestion failed for {file_path}", extra={"job_id": job_id})
+        file_ops.move_file(file_path, "data/failed", job_id)  # Move to failed if ingest_file fails
+        session.query(ProcessingJob).filter_by(job_id=job_id).update({
+            'status': 'FAILED',
+            'error_summary': 'Ingestion failed',
+            'finished_at': datetime.utcnow()
+        })
+        session.commit()
         return False
-    
+    if file_ops.move_file(file_path, "data/processed", job_id):  # Move only if ingest_file succeeds
+        session.query(ProcessingJob).filter_by(job_id=job_id).update({
+            'status': 'SUCCESS',  # Use 'SUCCESS' to avoid truncation
+            'finished_at': datetime.utcnow()
+        })
+        session.commit()
+        logger.info(f"Successfully processed {file_path}", extra={"job_id": job_id})
+        return True
+    else:
+        logger.error(f"Failed to move {file_path} to data/processed", extra={"job_id": job_id})
+        session.query(ProcessingJob).filter_by(job_id=job_id).update({
+            'status': 'FAILED',
+            'error_summary': 'File move failed',
+            'finished_at': datetime.utcnow()
+        })
+        session.commit()
+        return False
+         
     logger.info(f"Successfully processed {file_path}", extra={"job_id": job_id})
     return True
 
 def main():
     Config.load('config/settings.yaml')
+    logger.debug("Loaded settings.yaml, inbox path: %s", Config.get('paths', {}).get('inbox', 'data/inbox'))
     engine = create_engine()
     session = create_session(engine)
     
@@ -78,6 +107,7 @@ def main():
             session.rollback()
             continue
     session.close()
-
-if __name__ == '__main__':
+    
+    
+if __name__ == '__main__': 
     main()
