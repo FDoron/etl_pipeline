@@ -1,130 +1,104 @@
 import streamlit as st
 import pandas as pd
 import os
-from src.utils.logger import logger
+from datetime import datetime, timedelta
+from sqlalchemy.orm import sessionmaker
 from src.utils.config_loader import Config
-from src.ingestion.ingest import ingest_file
-from src.ingestion.file_ops import move_file
-from src.db.db_ops import init_db, ProcessingJob, FailedRow, Reports
-from sqlalchemy.orm import Session
-from sqlalchemy import select
-from datetime import datetime
+from src.db.db_ops import ProcessingJob
 
-def redact_sensitive(data):
-    """Redact sensitive fields from log data."""
-    if isinstance(data, dict):
-        return {k: "REDACTED" if k in ['password', 'user', 'connection_string'] else redact_sensitive(v) for k, v in data.items()}
-    return data
-
-def main():
-    st.title("ETL Pipeline Dashboard")
-
-    # Load configuration
+def get_db_session(config):
+    """Create SQLAlchemy session from config."""
+    db_config = config.get('database', {})
+    db_type = db_config.get('type')
+    if not db_type:
+        st.error("Database type not specified in settings.yaml. Expected 'mysql'.")
+        st.stop()
+    dialect_map = {'mysql': 'mysql+mysqlconnector'}
+    driver = dialect_map.get(db_type)
+    if not driver:
+        st.error(f"Unsupported database type '{db_type}' in settings.yaml. Expected 'mysql'.")
+        st.stop()
+    port = db_config.get('port', 3306)
+    connection_string = f"{driver}://{db_config.get('user')}:{db_config.get('password')}@{db_config.get('host')}:{port}/{db_config.get('database')}"
     try:
-        Config.load('config/settings.yaml')
-        db_type = Config.get('db.type')
-        db_host = Config.get('db.host')
-        db_port = Config.get('db.port')
-        db_user = Config.get('db.user')
-        db_password = Config.get('db.password')
-        db_database = Config.get('db.database')
-        providers = Config.get('providers', {})
-        inbox_dir = Config.get('paths.inbox', 'data/inbox')
-        failed_dir = Config.get('paths.failed', 'data/failed')
-
-        required_fields = {'db.type': db_type, 'db.host': db_host, 'db.user': db_user, 'db.password': db_password, 'db.database': db_database}
-        missing_fields = [key for key, value in required_fields.items() if value is None]
-        if missing_fields:
-            raise ValueError(f"Missing required config fields: {', '.join(missing_fields)}")
-        
-        if db_type.lower() != 'mysql':
-            raise ValueError(f"Unsupported database type: {db_type}. Expected 'mysql'.")
-        connection_string = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_database}"
-    except (FileNotFoundError, RuntimeError, ValueError) as e:
-        st.error(f"Configuration error: {str(e)}")
-        logger.error("Configuration loading failed", extra=redact_sensitive({"error": str(e)}))
-        return
-
-    # Initialize database
-    try:
-        SessionLocal = init_db(connection_string)
+        from sqlalchemy import create_engine
+        engine = create_engine(connection_string)
+        return sessionmaker(bind=engine)()
     except Exception as e:
-        st.error(f"Database initialization failed: {str(e)}")
-        logger.error("Database initialization failed", extra=redact_sensitive({"error": str(e)}))
-        return
+        st.error(f"Failed to create database session: {str(e)}")
+        st.stop()
 
-    # Display Processing Jobs
-    st.header("Processing Jobs")
-    with SessionLocal() as session:
-        jobs_query = select(ProcessingJob)
-        jobs_df = pd.read_sql(jobs_query, session.bind)
-        st.dataframe(jobs_df, use_container_width=True)
+def fetch_job_data(session, status_filter=None, days_filter=None):
+    """Fetch job data from ProcessingJob table with optional filters."""
+    query = session.query(ProcessingJob)
+    if status_filter and status_filter != "All":
+        query = query.filter(ProcessingJob.status == status_filter)
+    if days_filter:
+        cutoff_date = datetime.utcnow() - timedelta(days=days_filter)
+        query = query.filter(ProcessingJob.finished_at >= cutoff_date)
+    jobs = query.all()
+    job_data = [{
+        'job_id': job.job_id,
+        'file_name': job.file_name,
+        'provider': job.provider,
+        'report_period': job.report_period,
+        'rows_processed': job.rows_processed,
+        'rows_inserted': job.rows_inserted,
+        'rows_failed': job.rows_failed,
+        'status': job.status,
+        'error_summary': str(job.error_summary or ''),
+        'started_at': job.started_at,
+        'finished_at': job.finished_at
+    } for job in jobs]
+    return pd.DataFrame(job_data)
 
-    # Display Failed Rows
-    st.header("Failed Rows")
-    with SessionLocal() as session:
-        failed_query = select(FailedRow)
-        failed_df = pd.read_sql(failed_query, session.bind)
-        st.dataframe(failed_df, use_container_width=True)
+def highlight_invalid_rows(row):
+    """Style invalid rows red based on errors column."""
+    return ['background-color: #FFCCCC' if pd.notna(row.get('errors', '')) else '' for _ in row]
 
-    # Display Reports
-    st.header("Reports")
-    with SessionLocal() as session:
-        reports_query = select(Reports)
-        reports_df = pd.read_sql(reports_query, session.bind)
-        st.dataframe(reports_df, use_container_width=True)
+def render_button(row):
+    """Render Upload button for PARTIAL rows."""
+    if row['status'] == 'PARTIAL' and Config.get('ingestion.skip_reports_insert', False):
+        return f'<button>Upload</button>'
+    return ''
 
-    # Reprocess Failed Files
-    st.header("Reprocess Failed Files")
-    failed_files = [f for f in os.listdir(failed_dir) if os.path.isfile(os.path.join(failed_dir, f))]
-    if failed_files:
-        selected_file = st.selectbox("Select a failed file to reprocess", failed_files)
-        if st.button("Reprocess"):
-            with SessionLocal() as session:
-                # Move file to inbox
-                failed_path = os.path.join(failed_dir, selected_file)
-                inbox_path = os.path.join(inbox_dir, selected_file.replace('_failed', ''))
-                try:
-                    move_file(failed_path, inbox_dir)
-                    logger.info("Moved file for reprocessing", extra={"file": selected_file, "from": failed_path, "to": inbox_path})
-                    
-                    # Create new processing job
-                    provider_key = selected_file.split('_')[0]
-                    report_period = selected_file.split('_')[-1].split('.')[0]
-                    job = ProcessingJob(
-                        file_name=selected_file,
-                        provider=provider_key,
-                        report_period=report_period,
-                        status='STARTED',
-                        rows_processed=0,
-                        rows_inserted=0,
-                        rows_failed=0,
-                        started_at=datetime.utcnow()
-                    )
-                    session.add(job)
-                    session.commit()
-                    job_id = job.job_id
+st.title("ETL Pipeline Dashboard")
+Config.load()
+session = get_db_session(Config.load())
 
-                    # Ingest file
-                    provider_mapping = providers.get(provider_key, {})
-                    success = ingest_file(inbox_path, provider_mapping, session, job_id)
-                    
-                    if success:
-                        st.success(f"Successfully reprocessed {selected_file}")
-                        logger.info("File reprocessed successfully", extra={"file": selected_file, "job_id": job_id})
-                    else:
-                        st.error(f"Failed to reprocess {selected_file}")
-                        logger.error("File reprocessing failed", extra={"file": selected_file, "job_id": job_id})
-                        session.query(ProcessingJob).filter_by(job_id=job_id).update({
-                            'status': 'FAILED',
-                            'finished_at': datetime.utcnow()
-                        })
-                        session.commit()
-                except Exception as e:
-                    st.error(f"Error reprocessing {selected_file}: {str(e)}")
-                    logger.error("Reprocessing error", extra={"file": selected_file, "error": str(e)})
-    else:
-        st.write("No failed files available for reprocessing.")
+# Filters
+st.subheader("Filter Jobs")
+col1, col2 = st.columns(2)
+status_options = ['All', 'STARTED', 'SUCCESS', 'FAILED', 'PARTIAL']
+status_filter = col1.selectbox("Filter by Status", status_options, index=0)
+days_filter = col2.number_input("Filter by Last X Days", min_value=1, max_value=365, value=7, step=1)
 
-if __name__ == "__main__":
-    main()
+# Display ProcessingJob table
+st.subheader("Processing Jobs")
+job_data = fetch_job_data(session, status_filter, days_filter)
+if job_data.empty:
+    st.warning("No jobs match the selected filters.")
+else:
+    display_data = job_data.copy()
+    if Config.get('ingestion.skip_reports_insert', False):
+        display_data['Action'] = display_data.apply(render_button, axis=1)
+    st.dataframe(display_data, use_container_width=True, hide_index=True)
+
+# Highlighted DataFrame under table
+st.subheader("View Highlighted Data")
+job_ids = job_data['job_id'].tolist()
+if job_ids:
+    selected_job_id = st.selectbox("Select Job ID", job_ids)
+    if selected_job_id:
+        job = job_data[job_data['job_id'] == selected_job_id].iloc[0]
+        file_name_base = os.path.basename(job['file_name']).replace('.csv', '').replace('.xlsx', '')
+        file_path = f'data/review/{file_name_base}_highlighted.xlsx'
+        if os.path.exists(file_path):
+            df = pd.read_excel(file_path)
+            st.dataframe(df.style.apply(highlight_invalid_rows, axis=1), use_container_width=True)
+        else:
+            st.error(f"File not found: {file_path}")
+else:
+    st.warning("No jobs available to view.")
+
+session.close()

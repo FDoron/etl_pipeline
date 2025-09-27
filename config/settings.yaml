@@ -31,6 +31,9 @@ required_columns:
   - name
   - fee
 
+ingestion:
+  skip_reports_insert: true
+
 validation:
   id_sample_size: 5
   date_column_threshold: 0.7
@@ -46,7 +49,6 @@ data_prep:
     - find_date
     - identify_fee
   issue_threshold: 1
-  fee_values: [62, 30]
   fee_outlier_threshold: 10
   date_formats: ['%d-%m-%Y', '%d/%m/%Y', '%Y%m%d', '%m-%d-%Y', '%m/%d/%Y', '%b-%Y']
   cutoff_day: 5
@@ -56,3 +58,7 @@ data_prep:
     'ספק ג': 'ספק_ג'
   id_columns: ['id', 'customer_id', 'מס_לקוח', 'תז']
   fee_columns: ['fee', 'amount', 'cost', 'דמי', 'סכום']
+  mandatory_columns: ['ID', 'fee', 'provider', 'paid_month']
+  row_validation_rules:
+    fee_values: [62, 30]
+    provider_reject: ['unknown']

@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine as sa_create_engine, Column, Integer, String, DateTime, Text, Enum,ForeignKey,TIMESTAMP,UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.sql import text
 import pandas as pd
 import json
 from src.utils.logger import logger
@@ -32,16 +33,18 @@ class FailedRow(Base):
 class Reports(Base):
     __tablename__ = 'reports'
     row_id = Column(Integer, primary_key=True, autoincrement=True)
-    id = Column(String(50), nullable=False)
+    customer_id = Column(String(50), nullable=False)
     first_name = Column(String(255))
     last_name = Column(String(255))
-    fee = Column(Integer)
-    provider = Column(String(50), nullable=False)
-    reportPeriod = Column(String(7), nullable=False)
+    monthly_fee = Column(Integer)
+    provider_name = Column(String(50), nullable=False)
+    paid_month = Column(String(7), nullable=False)
     ingested_at = Column(TIMESTAMP, default=datetime.utcnow)
     status = Column(String(20))
     job_id = Column(Integer, ForeignKey('processing_jobs.job_id'))
-    __table_args__ = (UniqueConstraint('id', 'provider', 'reportPeriod', name='uix_customer_provider_period'),)
+    # In Reports class, line ~32
+    __table_args__ = (UniqueConstraint('customer_id', 'provider_name', 'paid_month', name='uix_customer_provider_period'),)
+    # __table_args__ = (UniqueConstraint('id', 'provider', 'reportPeriod', name='uix_customer_provider_period'),)
     
 class Clients(Base):
     __tablename__ = 'clients'
@@ -94,14 +97,35 @@ def log_failed_row(session, job_id, row, reason):
         logger.error(f"Failed to log failed row for job_id={job_id}: {str(e)}")
         session.rollback()
         raise
-
+    
+# In db_ops.py, replace insert_dataframe (around line ~107)
 def insert_dataframe(session, df, table_name, job_id):
-    """Insert DataFrame rows into the specified table."""
     try:
-        df.to_sql(table_name, con=session.bind, if_exists='append', index=False)
-        logger.info(f"Inserted {len(df)} rows into {table_name} for job_id={job_id}")
-        return True, None
+        row_list = df.to_dict('records')  # List of dicts
+        duplicates = []
+        for row_dict in row_list:
+            # Remove job_id and status, not in reports table
+            insert_dict = {k: v for k, v in row_dict.items() if k not in ['job_id', 'status']}
+            # Check for duplicate with case-insensitive provider_name
+            query = text("""
+                SELECT COUNT(*) FROM reports
+                WHERE customer_id = :customer_id
+                AND LOWER(provider_name) = LOWER(:provider_name)
+                AND paid_month = :paid_month
+            """)
+            result = session.execute(query, {
+                'customer_id': insert_dict['customer_id'],
+                'provider_name': insert_dict['provider_name'],
+                'paid_month': insert_dict['paid_month']
+            }).scalar()
+            if result > 0:
+                duplicates.append({'row_index': row_list.index(row_dict), 'data': row_dict, 'errors': ['Duplicate entry']})
+                continue
+            session.add(Reports(**insert_dict))
+        session.commit()
+        logger.debug(f"Inserted {len(row_list) - len(duplicates)} rows for job_id={job_id}, duplicates={len(duplicates)}")
+        return True, None, duplicates
     except Exception as e:
-        logger.error(f"Failed to insert data to {table_name} for job_id={job_id}: {str(e)}")
-        return False, str(e)
-
+        logger.error(f"Failed to insert row for job_id={job_id}: {str(e)}")
+        session.rollback()
+        return False, str(e), []

@@ -33,19 +33,19 @@ def prepare_data(df, provider_mapping, session, job_id):
         func = step_functions.get(step)
         if not func:
             logger.error(f"Step {step} not implemented for job_id={job_id}")
-            # return {'status': 'failed', 'df': None, 'reason': f'Step {step} not implemented'}
-            return {'status': 'failed', 'df': None, 'reason': f'Step {step} not implemented', 'outliers': pd.DataFrame()}
+            return {'status': 'failed', 'df': None, 'reason': f'Step {step} not implemented'}
+            # return {'status': 'failed', 'df': None, 'reason': f'Step {step} not implemented', 'outliers': pd.DataFrame()}
         status, df, reason = func(df, provider_mapping, session, job_id, config)
         logger.info(f"Step {step}: status={status}, reason={reason}, shape={df.shape if df is not None else None}", extra={"job_id": job_id})
         if status == 'failed':
-            # return {'status': 'failed', 'df': None, 'reason': reason}
-            return {'status': 'failed', 'df': None, 'reason': reason, 'outliers': pd.DataFrame()}
+            return {'status': 'failed', 'df': None, 'reason': reason}
+            # return {'status': 'failed', 'df': None, 'reason': reason, 'outliers': pd.DataFrame()}
         if status == 'managed':
             managed_count += 1
             if managed_count > config.get('issue_threshold', 1):
                 return {'status': 'failed', 'df': None, 'reason': 'Too many managed issues'}
-    # return {'status': 'ok', 'df': df, 'reason': 'All steps completed'}
-    return {'status': 'ok', 'df': df, 'reason': 'All steps completed', 'outliers': pd.DataFrame()}
+    return {'status': 'ok', 'df': df, 'reason': 'All steps completed'}
+    # return {'status': 'ok', 'df': df, 'reason': 'All steps completed', 'outliers': pd.DataFrame()}
 
 def _isolate_table_step(df, provider_mapping, session, job_id, config):
     df = df.dropna(how='all').dropna(axis=1, how='all')
@@ -150,13 +150,10 @@ def _identify_fee_step(df, provider_mapping, session, job_id, config):
     id_columns = config.get('data_prep', {}).get('id_columns', [])
     fee_columns = config.get('data_prep', {}).get('fee_columns', [])
     fee_values = config.get('fee_values', [62, 30])
-    fee_outlier_threshold = config.get('fee_outlier_threshold', 10)
     fee_valid_threshold = config.get('data_prep', {}).get('fee_valid_threshold', 0.7)
     non_numeric_threshold = config.get('data_prep', {}).get('non_numeric_threshold', 0.1)
     
-    clean_df = df.copy()
     fee_column = None
-    problematic_rows = None
     
     logger.debug(f"Starting fee identification: columns={list(df.columns)}, dtypes={df.dtypes.to_dict()}, sample_size={sample_size}, fee_values={fee_values}", extra={"job_id": job_id})
     
@@ -172,7 +169,6 @@ def _identify_fee_step(df, provider_mapping, session, job_id, config):
         logger.error(f"Failed to archive {file_path}: {str(e)}", extra={"job_id": job_id})
     
     def validate_fee_column(col, df, sample_size, fee_values, fee_valid_threshold, non_numeric_threshold):
-        # Initial sample check for numeric and length
         sample = df[col].dropna().sample(n=min(sample_size, len(df[col].dropna())), random_state=42).astype(str)
         if not sample.str.isnumeric().all():
             logger.debug(f"Column {col} has non-numeric values in sample: {sample.tolist()[:5]}", extra={"job_id": job_id})
@@ -180,7 +176,6 @@ def _identify_fee_step(df, provider_mapping, session, job_id, config):
         if sample.str.len().max() > 6:
             logger.debug(f"Column {col} has values >6 digits in sample: {sample.tolist()[:5]}", extra={"job_id": job_id})
             return False
-        # Validate full column
         cleaned_values = df[col].astype(str).str.strip()
         sample_numeric = pd.to_numeric(cleaned_values, errors='coerce').astype(float)
         if sample_numeric.isna().sum() / len(sample_numeric) > non_numeric_threshold:
@@ -193,7 +188,6 @@ def _identify_fee_step(df, provider_mapping, session, job_id, config):
     
     # Step 1: Check if headers exist and match fee_columns
     has_headers = not all(col.startswith('col_') for col in df.columns)
-    fee_column = None
     if has_headers:
         for col in df.columns:
             if col.lower() in [c.lower() for c in fee_columns]:
@@ -201,22 +195,18 @@ def _identify_fee_step(df, provider_mapping, session, job_id, config):
                     fee_column = col
                     logger.debug(f"Found fee column {col} by name match", extra={"job_id": job_id})
                     break
-
-    # Step 2: If no fee column found, check all columns based on sample
+    
+    # Step 2: If no fee column found, check all columns
     if not fee_column:
         for col in df.columns:
             if col.lower() in [c.lower() for c in id_columns]:
                 logger.debug(f"Skipping {col}: matches ID column", extra={"job_id": job_id})
                 continue
-            # Check sample for possibility
             sample = df[col].dropna().sample(n=min(sample_size, len(df[col].dropna())), random_state=42).astype(str)
-            # Skip if sample consists of characters (non-numeric)
             if not sample.str.isnumeric().all():
                 continue
-            # Skip if string or number is longer than 6 digits
             if sample.str.len().max() > 6:
                 continue
-            # If promising, validate full column
             if validate_fee_column(col, df, sample_size, fee_values, fee_valid_threshold, non_numeric_threshold):
                 fee_column = col
                 logger.debug(f"Found fee column {col} by value check", extra={"job_id": job_id})
@@ -225,39 +215,11 @@ def _identify_fee_step(df, provider_mapping, session, job_id, config):
     # Step 3: Handle fee column or fail
     if not fee_column:
         logger.error(f"No valid fee column found for job_id={job_id}", extra={"job_id": job_id})
-        return 'error', clean_df, 'No valid fee column found'
+        return 'error', df, 'No valid fee column found'
     
-    # Step 4: Process outliers
-    cleaned_values = df[fee_column].astype(str).str.strip()
-    sample_numeric = pd.to_numeric(cleaned_values, errors='coerce').astype(float)
-    outliers = df[sample_numeric.isna() | ~sample_numeric.isin([float(v) for v in fee_values]) | cleaned_values.str.strip() == '']
-    outlier_count = len(outliers)
-    max_outliers = min(fee_outlier_threshold, len(df))
-    
-    # Log outliers by type and row index
-    for idx, row in outliers.iterrows():
-        val = row[fee_column]
-        row_dict = row.to_dict()  # Explicitly convert Series to dict
-        if pd.isna(val) or str(val).strip() == '':
-            logger.debug(f"Outlier in {fee_column} at row {idx}: empty/null", extra={"job_id": job_id, "row_data": str(row_dict)})
-        elif pd.isna(pd.to_numeric(str(val).strip(), errors='coerce')):
-            logger.debug(f"Outlier in {fee_column} at row {idx}: non-numeric ({val})", extra={"job_id": job_id, "row_data": str(row_dict)})
-        else:
-            logger.debug(f"Outlier in {fee_column} at row {idx}: not in fee_values ({val})", extra={"job_id": job_id, "row_data": str(row_dict)})
-
-    clean_df = clean_df.rename(columns={fee_column: 'fee'})
-    logger.info(f"Fee column identified: {fee_column}, {outlier_count} outliers handled", extra={"job_id": job_id})
-
-    # status = 'error' if outlier_count > max_outliers else 'ok'
-    # processed_df = clean_df if outlier_count == 0 else df[~df.index.isin(outliers.index)].copy()
-    # reason = f"Fee column identified: {fee_column}, {outlier_count} outliers handled"
-    # return status, processed_df, reason
-    return {
-        'status': 'error' if outlier_count > max_outliers else 'ok',
-        'df': clean_df if outlier_count == 0 else df[~df.index.isin(outliers.index)].copy(),
-        'reason': f"Fee column identified: {fee_column}, {outlier_count} outliers handled",
-        'outliers': outliers
-    }
+    df = df.rename(columns={fee_column: 'fee'})
+    logger.info(f"Fee column identified: {fee_column}", extra={"job_id": job_id})
+    return 'ok', df, f'Fee column identified: {fee_column}'
 
 
 def _find_date_step(df, provider_mapping, session, job_id, config):
@@ -333,6 +295,7 @@ def _identify_provider_step(df, provider_mapping, session, job_id, config):
             break
     if provider_column:
         provider_mapping['provider'] = selected_provider
+        df = df.rename(columns={provider_column: 'provider'})
         logger.info(f"Provider column identified: {provider_column}, provider: {selected_provider}", extra={"job_id": job_id})
         return 'ok', df, f'Provider column identified: {provider_column}, provider: {selected_provider}'
     logger.info(f"No provider column found for job_id={job_id}")

@@ -7,7 +7,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), "../../config/providers.js
 with open(CONFIG_FILE, "r") as f:
     PROVIDER_CONFIG = json.load(f)
 
-REQUIRED_COLUMNS = ["CustomerID", "CustomerName", "MonthlyFee", "ReportingMonth"]
+# REQUIRED_COLUMNS = ["CustomerID", "CustomerName", "MonthlyFee", "ReportingMonth"]
 
 def validate_and_clean(df, provider):
     mapping = PROVIDER_CONFIG.get(provider, {}).get("columns", {})
@@ -21,9 +21,9 @@ def validate_and_clean(df, provider):
     df = df.rename(columns=col_map)
 
     # Check required columns
-    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+    # missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    # if missing:
+    #     raise ValueError(f"Missing required columns: {missing}")
 
     # Drop rows with null IDs or Fees
     df = df.dropna(subset=["CustomerID", "MonthlyFee"])
