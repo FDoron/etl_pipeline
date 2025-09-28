@@ -183,70 +183,67 @@ def ingest_file(file_path, provider_mapping, session, job_id):
         valid_df = valid_df.rename(columns={k: v for k, v in column_mapping.items() if k in valid_df.columns})
         logger.debug(f"Mapped columns for job_id={job_id}: {list(valid_df.columns)}", extra={"job_id": job_id})
         # Insert valid data
-        if Config.get('ingestion.skip_reports_insert', False):
-            logger.info(f"Skipping reports table insert for job_id={job_id}", extra={"job_id": job_id})
-            session.query(ProcessingJob).filter_by(job_id=job_id).update({
-                'status': 'PARTIAL',
-                'rows_processed': len(original_df),
-                'rows_failed': len(invalid_rows),
-                'rows_inserted': 0,
-                'finished_at': datetime.utcnow()
-            })
-            session.commit()
-        else:
-            success, error, duplicates = insert_dataframe(session, valid_df, 'reports', job_id)
-            if duplicates:
-                invalid_rows.extend(duplicates)
-                logger.warning(f"Found {len(duplicates)} duplicate rows for job_id={job_id}", extra={"job_id": job_id, "duplicates": len(duplicates)})
-            if not success:
-                logger.error(f"Failed to insert data to reports", extra={"job_id": job_id, "error": error})
-                session.query(ProcessingJob).filter_by(job_id=job_id).update({
-                    'status': 'FAILED',
-                    'error_summary': f'Failed to insert data: {error}',
-                    'finished_at': datetime.utcnow()
-                })
-                session.commit()
-                move_file(file_name, 'data/archive', suffix='failed')
-                return False
+        # Fetch ProcessingJob to get file_name, report_period, job_id, status
+        job = session.query(ProcessingJob).filter_by(job_id=job_id).first()
+        original_name = os.path.splitext(os.path.basename(job.file_name))[0]  # Extract original name without extension
+        reported_date = job.report_period.replace('-', '')  # Convert e.g., '09-2025' to '092025'
+        status = job.status  # Use ProcessingJob status (STARTED, SUCCESS, FAILED, PARTIAL)
 
-        # Handle mixed case: move original to archive, save valid as Excel in processed, invalid to review
-        os.makedirs('data/review', exist_ok=True)
+        # Save review file (invalid rows) with naming: original_name_reported_date_job_id_status_review.xlsx
         if invalid_rows:
-
-            # Save invalid rows to review with full data
             invalid_df = pd.DataFrame([row['data'] for row in invalid_rows])
             invalid_df['row_index'] = [row['row_index'] for row in invalid_rows]
             invalid_df['errors'] = [', '.join(row['errors']) for row in invalid_rows]
-            review_path = f'data/review/{os.path.basename(file_path).rsplit(".", 1)[0]}_review.xlsx'
-            invalid_df.to_excel(review_path, index=False)
-            logger.info(f"Saved {len(invalid_rows)} invalid rows to {review_path}", extra={"job_id": job_id})
-            
-            # Save highlighted original with invalid rows marked in red
-            highlighted_df = original_df.copy()
-            invalid_indices = [row['row_index'] for row in invalid_rows]
-            highlighted_df['errors'] = [''] * len(highlighted_df)
-            highlighted_df.loc[highlighted_df.index.isin(invalid_indices), 'errors'] = [', '.join(row['errors']) for row in invalid_rows]
-            output_path = f'data/review/{os.path.basename(file_path).rsplit(".", 1)[0]}_highlighted.xlsx'
-            highlighted_df.to_excel(output_path, index=False)
-            wb = load_workbook(output_path)
-            ws = wb.active
-            red_fill = PatternFill(start_color='FFFF0000', end_color='FFFF0000', fill_type='solid')
-            for idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), start=1):
-                if highlighted_df.index[idx-1] in invalid_indices:
-                    for cell in row:
-                        cell.fill = red_fill
-            wb.save(output_path)
-            logger.info(f"Saved highlighted original to {output_path}", extra={"job_id": job_id})
-            
+            review_file = f"data/review/{original_name}_{reported_date}_{job_id}_{status}_review.xlsx"
+            invalid_df.to_excel(review_file, index=False)
+            logger.info(f"Saved {len(invalid_rows)} invalid rows to {review_file}", extra={"job_id": job_id})
+
+        # Save highlighted file (all rows, invalid highlighted) with naming: original_name_reported_date_job_id_status_highlighted.xlsx
+        valid_df['errors'] = ''
+        if invalid_rows:
+            invalid_df['errors'] = invalid_df['errors'].apply(lambda x: '; '.join(x))
+            combined_df = pd.concat([valid_df, invalid_df]).sort_index()
         else:
-            # No issues: move to processed
-            move_file(file_path, 'data/processed', suffix='processed')
-            # Save valid as Excel in processed
-            valid_df.to_excel(f'data/processed/{os.path.basename(file_path).rsplit(".", 1)[0]}_valid.xlsx', index=False)
-        
-        logger.info(f"Moved {file_path} to archive for mixed case with {len(invalid_rows)} invalid rows", extra={"job_id": job_id})
+            combined_df = valid_df
+        highlighted_file = f"data/review/{original_name}_{reported_date}_{job_id}_{status}_highlighted.xlsx"
+        combined_df.to_excel(highlighted_file, index=False)
+        wb = load_workbook(highlighted_file)
+        ws = wb.active
+        red_fill = PatternFill(start_color='FFFF0000', end_color='FFFF0000', fill_type='solid')
+        invalid_indices = [row['row_index'] for row in invalid_rows]
+        for idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), start=1):
+            if combined_df.index[idx-1] in invalid_indices:
+                for cell in row:
+                    cell.fill = red_fill
+        wb.save(highlighted_file)
+        logger.info(f"Saved highlighted original to {highlighted_file}", extra={"job_id": job_id})
+
+        # Move input file to data/review with naming: original_name_reported_date_job_id_status.extension
+        new_file_path = move_file(job.file_name, 'data/review', job_id, status, job.report_period)
+        if not new_file_path:
+            logger.error(f"Failed to move input file for job_id={job_id}", extra={"job_id": job_id})
+            session.query(ProcessingJob).filter_by(job_id=job_id).update({
+                'status': 'FAILED',
+                'error_summary': 'Failed to move input file',
+                'finished_at': datetime.utcnow()
+            })
+            session.commit()
+            return False
+
+        # Update ProcessingJob with new file path
+        session.query(ProcessingJob).filter_by(job_id=job_id).update({
+            'file_name': new_file_path,
+            'rows_processed': len(original_df),
+            'rows_failed': len(invalid_rows),
+            'rows_inserted': len(valid_df) if not Config.get('ingestion.skip_reports_insert', False) else 0,
+            'finished_at': datetime.utcnow(),
+            'status': 'SUCCESS' if not invalid_rows else 'PARTIAL'
+        })
+        session.commit()
+        logger.info(f"Completed ingestion for job_id={job_id} with {len(invalid_rows)} invalid rows", extra={"job_id": job_id})
         return True
 
+    # Replace existing exception block
     except Exception as e:
         logger.error(f"Ingestion failed", extra={"job_id": job_id, "file": file_path, "error": str(e)})
         session.query(ProcessingJob).filter_by(job_id=job_id).update({
@@ -255,5 +252,5 @@ def ingest_file(file_path, provider_mapping, session, job_id):
             'finished_at': datetime.utcnow()
         })
         session.commit()
-        move_file(file_path, 'data/failed', suffix='failed')
+        move_file(file_path, 'data/failed', job_id, 'FAILED', job.report_period if job else 'unknown')
         return False

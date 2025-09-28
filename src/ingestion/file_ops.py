@@ -11,6 +11,7 @@ from src.db.db_ops import ProcessingJob
 from src.utils.utils import find_id_column, is_valid_israeli_id
 import shutil
 import logging
+import re
 
 
 def ensure_filename_suffix(file_path):
@@ -24,9 +25,6 @@ def ensure_filename_suffix(file_path):
     return file_path
 
 def rename_file_with_id_column(file_path, session, job_id):
-    from datetime import datetime
-    import os
-    from src.utils.logger import logger
     try:
         filename = os.path.basename(file_path)
         base, ext = os.path.splitext(filename)
@@ -47,32 +45,33 @@ def rename_file_with_id_column(file_path, session, job_id):
         session.commit()
         return None, None
 
-def move_file(file_path, target_dir, suffix=None):
-    """Move file to target directory, avoiding duplicates by adding timestamp."""
-    os.makedirs(target_dir, exist_ok=True)
-    base, ext = os.path.splitext(os.path.basename(file_path))
-    if suffix:
-        new_name = f"{base}_{suffix}{ext}"
-    else:
-        new_name = os.path.basename(file_path)
-    target_path = os.path.join(target_dir, new_name)
+def move_file(file_name, dest_dir, job_id, status, report_period):
+    """Move and rename file to original_name_reported_date_job_id_status.extension."""
+    # Extract original name and extension from full path
+    base_name = os.path.basename(file_name)
+    original_name, ext = os.path.splitext(base_name)
     
-    # Handle duplicates by appending timestamp
-    counter = 1
-    while os.path.exists(target_path):
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        new_name = f"{base}_{suffix}_{timestamp}_{counter}{ext}" if suffix else f"{base}_{timestamp}_{counter}{ext}"
-        target_path = os.path.join(target_dir, new_name)
-        counter += 1
+    # Remove existing job_id_status if resubmission
+    pattern = r'_\d+_(STARTED|SUCCESS|FAILED|PARTIAL)$'
+    if re.search(pattern, original_name):
+        original_name = re.sub(pattern, '', original_name)
     
+    # Construct new file name
+    reported_date = report_period.replace('-', '')  # e.g., '09-2025' -> '092025'
+    new_name = f"{original_name}_{reported_date}_{job_id}_{status}{ext}"
+    dest_path = os.path.join(dest_dir, new_name)
+    
+    # Ensure dest_dir exists
+    os.makedirs(dest_dir, exist_ok=True)
+    
+    # Move/rename file using full source path
     try:
-        os.rename(file_path, target_path)
-        logger.info("Moved file", extra={"original": file_path, "target": target_path})
-        return target_path
-    except OSError as e:
-        logger.error("Failed to move file", extra={"file": file_path, "target": target_path, "error": str(e)})
-        raise
-
+        os.rename(file_name, dest_path)  # Use full file_name, not base_name
+        logger.info(f"Moved file to {dest_path}", extra={"job_id": job_id})
+        return dest_path
+    except Exception as e:
+        logger.error(f"Failed to move file {file_name} to {dest_path}: {str(e)}", extra={"job_id": job_id})
+        return None
 
 def handle_fee_outliers(result):
     """Handle outlier saving and return updated df and status."""

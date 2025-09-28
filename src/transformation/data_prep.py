@@ -6,7 +6,7 @@ from collections import Counter
 from src.utils.config_loader import Config
 from src.utils.logger import logger
 from src.utils.utils import find_id_column, is_valid_israeli_id
-from src.db.db_ops import Clients
+from src.db.db_ops import Clients, ProcessingJob
 from sqlalchemy.orm import sessionmaker
 from charset_normalizer import detect
 import shutil
@@ -22,6 +22,7 @@ def prepare_data(df, provider_mapping, session, job_id):
         'isolate_table': _isolate_table_step,
         'identify_provider': _identify_provider_step,
         'identify_id': _identify_id_step,
+        'truncate_summary_rows': _truncate_summary_rows_step,
         'identify_fee': _identify_fee_step,
         'find_date': _find_date_step
     }
@@ -141,9 +142,33 @@ def _identify_id_step(df, provider_mapping, session, job_id, config):
         logger.error(f"No valid ID column found for job_id={job_id}")
         return 'error', df, 'No valid ID column found'
     
-    df = df.rename(columns={id_column: 'ID'})
+    df = df.rename(columns={id_column: 'customer_id'})
     logger.info(f"ID column identified: {id_column}", extra={"job_id": job_id})
     return 'ok', df, f'ID column identified: {id_column}'
+
+def _truncate_summary_rows_step(df, provider_mapping, session, job_id, config):
+    """Truncate up to last 4 rows if customer_id is invalid."""
+    if 'customer_id' not in df.columns:
+        logger.error(f"customer_id column missing after identify_id for job_id={job_id}", extra={"job_id": job_id})
+        session.query(ProcessingJob).filter_by(job_id=job_id).update({
+            'status': 'FAILED',
+            'error_summary': 'Missing customer_id column after identify_id',
+            'finished_at': datetime.utcnow()
+        })
+        session.commit()
+        return None, job_id, session
+    for _ in range(4):
+        if len(df) == 0:
+            break
+        last_row = df.iloc[-1]
+        customer_id = str(last_row['customer_id']).strip()
+        if pd.isna(last_row['customer_id']) or not customer_id or customer_id.lower() == 'nan' or not is_valid_israeli_id(customer_id):
+            df = df.iloc[:-1]
+            logger.debug(f"Truncated summary row with invalid customer_id for job_id={job_id}", extra={"job_id": job_id})
+        else:
+            break
+    logger.debug(f"Processed {len(df)} rows after truncating summary rows for job_id={job_id}", extra={"job_id": job_id})
+    return 'ok', df, 'Summary rows truncated'
 
 def _identify_fee_step(df, provider_mapping, session, job_id, config):
     sample_size = min(config.get('validation.id_sample_size', 5), len(df))
@@ -220,7 +245,6 @@ def _identify_fee_step(df, provider_mapping, session, job_id, config):
     df = df.rename(columns={fee_column: 'fee'})
     logger.info(f"Fee column identified: {fee_column}", extra={"job_id": job_id})
     return 'ok', df, f'Fee column identified: {fee_column}'
-
 
 def _find_date_step(df, provider_mapping, session, job_id, config):
     date_formats = config.get('date_formats', ['%d-%m-%Y', '%d/%m/%Y', '%Y%m%d', '%m-%d-%Y', '%m/%d/%Y', '%b-%Y'])

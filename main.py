@@ -27,9 +27,9 @@ def process_file(file_path, session):
     provider_key, report_period = extract_provider_and_period(filename)
     logger.info(f"Processing file: {filename}, provider: {provider_key}, period: {report_period}")
     
-    # Create job
+    # Create job with full file path
     job = ProcessingJob(
-        file_name=filename,
+        file_name=file_path,  # Use full path instead of filename
         provider=provider_key,
         report_period=report_period,
         status='STARTED',
@@ -57,11 +57,17 @@ def process_file(file_path, session):
     file_path, majority_provider = rename_result
     file_path = ensure_filename_suffix(file_path)
     
+    # Update ProcessingJob.file_name with renamed path
+    session.query(ProcessingJob).filter_by(job_id=job_id).update({
+        'file_name': file_path  # Ensure renamed path is stored
+    })
+    session.commit()
+    
     # Ingest file
     success = ingest_file(file_path, {'column_mapping': Config.get('column_mapping', {}), 'provider': majority_provider, 'report_period': report_period}, session, job_id)
     if not success:
         logger.error(f"Ingestion failed for {file_path}", extra={"job_id": job_id})
-        file_ops.move_file(file_path, "data/failed", job_id)  # Move to failed if ingest_file fails
+        file_ops.move_file(file_path, "data/failed", job_id, 'FAILED', report_period)  # Pass report_period
         session.query(ProcessingJob).filter_by(job_id=job_id).update({
             'status': 'FAILED',
             'error_summary': 'Ingestion failed',
@@ -69,9 +75,9 @@ def process_file(file_path, session):
         })
         session.commit()
         return False
-    if file_ops.move_file(file_path, "data/processed", job_id):  # Move only if ingest_file succeeds
+    if file_ops.move_file(file_path, "data/processed", job_id, 'SUCCESS', report_period):  # Pass report_period
         session.query(ProcessingJob).filter_by(job_id=job_id).update({
-            'status': 'SUCCESS',  # Use 'SUCCESS' to avoid truncation
+            'status': 'SUCCESS',
             'finished_at': datetime.utcnow()
         })
         session.commit()
@@ -86,9 +92,6 @@ def process_file(file_path, session):
         })
         session.commit()
         return False
-         
-    logger.info(f"Successfully processed {file_path}", extra={"job_id": job_id})
-    return True
 
 def main():
     Config.load('config/settings.yaml')

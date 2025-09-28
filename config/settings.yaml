@@ -45,6 +45,7 @@ data_prep:
   steps:
     - isolate_table
     - identify_id
+    - truncate_summary_rows
     - identify_provider
     - find_date
     - identify_fee
@@ -58,7 +59,7 @@ data_prep:
     'ספק ג': 'ספק_ג'
   id_columns: ['id', 'customer_id', 'מס_לקוח', 'תז']
   fee_columns: ['fee', 'amount', 'cost', 'דמי', 'סכום']
-  mandatory_columns: ['ID', 'fee', 'provider', 'paid_month']
+  mandatory_columns: ['customer_id', 'fee', 'provider', 'paid_month']
   row_validation_rules:
     fee_values: [62, 30]
     provider_reject: ['unknown']
